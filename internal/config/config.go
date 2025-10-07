@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 	"golang.org/x/crypto/bcrypt"
@@ -54,6 +55,9 @@ type Config struct {
 
 	// GeminiWeb groups configuration for Gemini Web client
 	GeminiWeb GeminiWebConfig `yaml:"gemini-web" json:"gemini-web"`
+
+	// GeminiCLI groups configuration for Gemini CLI client
+	GeminiCLI GeminiCLIConfig `yaml:"gemini-cli" json:"gemini-cli"`
 }
 
 // GeminiWebConfig nests Gemini Web related options under 'gemini-web'.
@@ -78,6 +82,27 @@ type GeminiWebConfig struct {
 	// DisableContinuationHint, when true, disables the continuation hint for split prompts.
 	// The hint is enabled by default.
 	DisableContinuationHint bool `yaml:"disable-continuation-hint,omitempty" json:"disable-continuation-hint,omitempty"`
+}
+
+// GeminiCLIConfig nests Gemini CLI related options under 'gemini-cli'.
+type GeminiCLIConfig struct {
+	// CodeAssistEndpoint is the Gemini CLI Code Assist API endpoint
+	CodeAssistEndpoint string `yaml:"code-assist-endpoint" json:"code-assist-endpoint"`
+
+	// OAuthEndpoint is the OAuth2 authentication endpoint
+	OAuthEndpoint string `yaml:"oauth-endpoint" json:"oauth-endpoint"`
+
+	// GoogleApisEndpoint is the Google APIs base endpoint
+	GoogleApisEndpoint string `yaml:"google-apis-endpoint" json:"google-apis-endpoint"`
+
+	// ResourceManagerEndpoint is the Resource Manager API endpoint
+	ResourceManagerEndpoint string `yaml:"resource-manager-endpoint" json:"resource-manager-endpoint"`
+
+	// ServiceUsageEndpoint is the Service Usage API endpoint
+	ServiceUsageEndpoint string `yaml:"service-usage-endpoint" json:"service-usage-endpoint"`
+
+	// ProxyURL overrides the global proxy setting for Gemini CLI if provided
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -523,4 +548,48 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 			return
 		}
 	}
+}
+
+// GetCodeAssistEndpoint returns the Code Assist endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetCodeAssistEndpoint() string {
+	if c.CodeAssistEndpoint != "" {
+		return c.CodeAssistEndpoint
+	}
+	return "https://cloudcode-pa.googleapis.com" // Default official endpoint
+}
+
+// GetOAuthEndpoint returns the OAuth endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetOAuthEndpoint() string {
+	if c.OAuthEndpoint != "" {
+		return c.OAuthEndpoint
+	}
+	return "https://oauth2.googleapis.com" // Default official endpoint
+}
+
+// GetGoogleApisEndpoint returns the Google APIs endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetGoogleApisEndpoint() string {
+	if c.GoogleApisEndpoint != "" {
+		return c.GoogleApisEndpoint
+	}
+	return "https://www.googleapis.com" // Default official endpoint
+}
+
+// GetTokenURL returns the token URL constructed from OAuth endpoint
+func (c *GeminiCLIConfig) GetTokenURL() string {
+	oauthEndpoint := c.GetOAuthEndpoint()
+	return fmt.Sprintf("%s/token", strings.TrimSuffix(oauthEndpoint, "/"))
+}
+
+// GetUserinfoURL returns the userinfo URL constructed from Google APIs endpoint
+func (c *GeminiCLIConfig) GetUserinfoURL() string {
+	googleapisEndpoint := c.GetGoogleApisEndpoint()
+	return fmt.Sprintf("%s/oauth2/v2/userinfo", strings.TrimSuffix(googleapisEndpoint, "/"))
+}
+
+// GetProxyURL returns the proxy URL for Gemini CLI, with fallback to global
+func (c *GeminiCLIConfig) GetProxyURL(globalProxyURL string) string {
+	if c.ProxyURL != "" {
+		return c.ProxyURL
+	}
+	return globalProxyURL
 }
