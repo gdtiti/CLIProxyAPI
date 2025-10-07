@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    dockerfile: Dockerfile
+    image: cliproxy-api
     pull_policy: always
     build:
       context: .
