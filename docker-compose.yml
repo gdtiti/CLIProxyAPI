@@ -1,6 +1,6 @@
 services:
   cli-proxy-api:
-    image: cli-proxy-api:latest
+    dockerfile: Dockerfile
     pull_policy: always
     build:
       context: .
