@@ -8,7 +8,6 @@ services:
       args:
         VERSION: v1-dev
         COMMIT: gdtiti
-        BUILD_DATE: 2025-10-08
     container_name: cli-proxy-api
     ports:
       - "8317:8317"
