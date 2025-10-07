@@ -1,14 +1,13 @@
 services:
   cli-proxy-api:
-    image: ${CLI_PROXY_IMAGE:-eceasy/cli-proxy-api:latest}
+    image: cliproxy-api
     pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile
       args:
-        VERSION: ${VERSION:-dev}
-        COMMIT: ${COMMIT:-none}
-        BUILD_DATE: ${BUILD_DATE:-unknown}
+        VERSION: v1-dev
+        COMMIT: gdtiti
     container_name: cli-proxy-api
     ports:
       - "8317:8317"
@@ -18,7 +17,8 @@ services:
       - "11451:11451"
     volumes:
       - ./config.yaml:/CLIProxyAPI/config.yaml
-      - ./auths:/root/.cli-proxy-api
+      - ./auths:/CLIProxyAPI/auths
       - ./logs:/CLIProxyAPI/logs
       - ./conv:/CLIProxyAPI/conv
+      - ./static:/CLIProxyAPI/static
     restart: unless-stopped
