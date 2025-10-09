@@ -228,6 +228,9 @@ func LoadConfig(configFile string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Apply environment variable overrides
+	applyEnvironmentOverrides(&cfg)
+
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
 	if cfg.RemoteManagement.SecretKey != "" && !looksLikeBcrypt(cfg.RemoteManagement.SecretKey) {
@@ -247,6 +250,34 @@ func LoadConfig(configFile string) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// applyEnvironmentOverrides applies environment variable overrides to the configuration
+func applyEnvironmentOverrides(cfg *Config) {
+	// Override Gemini CLI configuration from environment variables from environment variables
+	if codeAssistEndpoint := os.Getenv("GEMINI_CODE_ASSIST_ENDPOINT"); codeAssistEndpoint != "" {
+		cfg.GeminiCLI.CodeAssistEndpoint = codeAssistEndpoint
+	}
+	if oauthEndpoint := os.Getenv("GEMINI_OAUTH_ENDPOINT"); oauthEndpoint != "" {
+		cfg.GeminiCLI.OAuthEndpoint = oauthEndpoint
+	}
+	if googleApisEndpoint := os.Getenv("GEMINI_GOOGLE_APIS_ENDPOINT"); googleApisEndpoint != "" {
+		cfg.GeminiCLI.GoogleApisEndpoint = googleApisEndpoint
+	}
+	if resourceManagerEndpoint := os.Getenv("GEMINI_RESOURCE_MANAGER_ENDPOINT"); resourceManagerEndpoint != "" {
+		cfg.GeminiCLI.ResourceManagerEndpoint = resourceManagerEndpoint
+	}
+	if serviceUsageEndpoint := os.Getenv("GEMINI_SERVICE_USAGE_ENDPOINT"); serviceUsageEndpoint != "" {
+		cfg.GeminiCLI.ServiceUsageEndpoint = serviceUsageEndpoint
+	}
+
+	// Override remote management configuration from environment variables
+	if allowRemote := os.Getenv("REMOTE_MANAGEMENT_ALLOW_REMOTE"); allowRemote != "" {
+		cfg.RemoteManagement.AllowRemote = allowRemote == "true" || allowRemote == "1"
+	}
+	if secretKey := os.Getenv("REMOTE_MANAGEMENT_SECRET_KEY"); secretKey != "" {
+		cfg.RemoteManagement.SecretKey = secretKey
+	}
 }
 
 func syncInlineAccessProvider(cfg *Config) {
