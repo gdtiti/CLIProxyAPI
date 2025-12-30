@@ -299,17 +299,14 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
 			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
 
-			// Use different headers based on auth type
-			// IDC auth uses Kiro IDE style headers (from kiro2api)
-			// Other auth types use Amazon Q CLI style headers
+			// Build User-Agent headers with machine_id from credential file
+			userAgent, xAmzUserAgent := buildUserAgentHeaders(auth)
+			httpReq.Header.Set("User-Agent", userAgent)
+			httpReq.Header.Set("X-Amz-User-Agent", xAmzUserAgent)
+			// IDC auth uses additional Kiro IDE specific header
 			if isIDCAuth(auth) {
-				httpReq.Header.Set("User-Agent", kiroIDEUserAgent)
-				httpReq.Header.Set("X-Amz-User-Agent", kiroIDEAmzUserAgent)
 				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
-				log.Debugf("kiro: using Kiro IDE headers for IDC auth")
-			} else {
-				httpReq.Header.Set("User-Agent", kiroUserAgent)
-				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+				log.Debugf("kiro: using Kiro IDE headers for IDC auth with machine_id")
 			}
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
@@ -632,17 +629,14 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			// Use endpoint-specific X-Amz-Target (critical for avoiding 403 errors)
 			httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
 
-			// Use different headers based on auth type
-			// IDC auth uses Kiro IDE style headers (from kiro2api)
-			// Other auth types use Amazon Q CLI style headers
+			// Build User-Agent headers with machine_id from credential file
+			userAgent, xAmzUserAgent := buildUserAgentHeaders(auth)
+			httpReq.Header.Set("User-Agent", userAgent)
+			httpReq.Header.Set("X-Amz-User-Agent", xAmzUserAgent)
+			// IDC auth uses additional Kiro IDE specific header
 			if isIDCAuth(auth) {
-				httpReq.Header.Set("User-Agent", kiroIDEUserAgent)
-				httpReq.Header.Set("X-Amz-User-Agent", kiroIDEAmzUserAgent)
 				httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
-				log.Debugf("kiro: using Kiro IDE headers for IDC auth")
-			} else {
-				httpReq.Header.Set("User-Agent", kiroUserAgent)
-				httpReq.Header.Set("X-Amz-User-Agent", kiroFullUserAgent)
+				log.Debugf("kiro: using Kiro IDE headers for IDC auth with machine_id")
 			}
 			httpReq.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 			httpReq.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
@@ -911,6 +905,40 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	}
 
 	return accessToken, profileArn
+}
+
+// getMachineID extracts machine_id from auth metadata.
+// Returns the stored machine_id or generates a new UUID if not found.
+func getMachineID(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return uuid.New().String()
+	}
+
+	if machineID, ok := auth.Metadata["machine_id"].(string); ok && machineID != "" {
+		return machineID
+	}
+
+	// Generate new UUID if not found
+	return uuid.New().String()
+}
+
+// buildUserAgentHeaders builds User-Agent and X-Amz-User-Agent headers with machine_id.
+// For IDC auth, uses Kiro IDE style headers; otherwise uses Amazon Q CLI style.
+func buildUserAgentHeaders(auth *cliproxyauth.Auth) (userAgent, xAmzUserAgent string) {
+	machineID := getMachineID(auth)
+
+	if isIDCAuth(auth) {
+		// Kiro IDE style headers (from kiro2api - for IDC auth)
+		// Format: aws-sdk-js/1.0.18 KiroIDE-0.2.13-{machineID}
+		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-%s", machineID)
+		xAmzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE-0.2.13-%s", machineID)
+	} else {
+		// Amazon Q CLI style headers (default)
+		userAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
+		xAmzUserAgent = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
+	}
+
+	return userAgent, xAmzUserAgent
 }
 
 // findRealThinkingEndTag finds the real </thinking> end tag, skipping false positives.
