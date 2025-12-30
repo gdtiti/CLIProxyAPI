@@ -74,6 +74,75 @@ show_help() {
     echo "  help, h             Show this help message"
 }
 
+# Show interactive menu
+show_menu() {
+    while true; do
+        clear
+        echo
+        print_header "========================================"
+        print_header "  CLIProxyAPIPlus Development Menu"
+        print_header "========================================"
+        echo
+        print_warning "Development:"
+        echo -e "  ${GREEN}1${RESET}. Install dependencies"
+        echo -e "  ${GREEN}2${RESET}. Start development server"
+        echo -e "  ${GREEN}3${RESET}. Build for production"
+        echo -e "  ${GREEN}4${RESET}. Run tests"
+        echo -e "  ${GREEN}5${RESET}. Run linter"
+        echo -e "  ${GREEN}6${RESET}. Format code"
+        echo -e "  ${GREEN}7${RESET}. Clean build artifacts"
+        echo
+        print_warning "Backend:"
+        echo -e "  ${GREEN}8${RESET}. Start backend"
+        echo -e "  ${GREEN}9${RESET}. Stop backend"
+        echo -e "  ${GREEN}10${RESET}. Restart backend"
+        echo -e "  ${GREEN}11${RESET}. Check backend status"
+        echo
+        print_warning "Authentication:"
+        echo -e "  ${GREEN}12${RESET}. Login menu"
+        echo -e "  ${GREEN}13${RESET}. Check quotas"
+        echo -e "  ${GREEN}14${RESET}. Verify credentials"
+        echo
+        print_warning "Other:"
+        echo -e "  ${GREEN}15${RESET}. Show help"
+        echo -e "  ${GREEN}0${RESET}. Exit"
+        echo
+        echo -ne "${CYAN}Enter your choice (0-15):${RESET} "
+        read choice
+
+        case $choice in
+            1) cmd_install; menu_pause ;;
+            2) cmd_dev; menu_pause ;;
+            3) cmd_build; menu_pause ;;
+            4) cmd_test; menu_pause ;;
+            5) cmd_lint; menu_pause ;;
+            6) cmd_format; menu_pause ;;
+            7) cmd_clean; menu_pause ;;
+            8) cmd_start; menu_pause ;;
+            9) cmd_stop; menu_pause ;;
+            10) cmd_restart; menu_pause ;;
+            11) cmd_status; menu_pause ;;
+            12) cmd_login_menu; menu_pause ;;
+            13) cmd_quota; menu_pause ;;
+            14) cmd_verify_creds; menu_pause ;;
+            15) show_help; menu_pause ;;
+            0) exit 0 ;;
+            *)
+                echo
+                print_error "Invalid choice. Please try again."
+                sleep 2
+                ;;
+        esac
+    done
+}
+
+# Pause and wait for user input
+menu_pause() {
+    echo
+    print_info "Press Enter to return to menu or Ctrl+C to exit..."
+    read
+}
+
 # Install dependencies
 cmd_install() {
     print_info "Installing dependencies..."
@@ -396,7 +465,13 @@ cmd_verify_creds() {
 }
 
 # Main command router
-CMD="${1:-help}"
+CMD="${1}"
+
+# If no command provided, show interactive menu
+if [ -z "$CMD" ]; then
+    show_menu
+    exit 0
+fi
 
 case $CMD in
     help|h)

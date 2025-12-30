@@ -17,16 +17,20 @@ The Plus release stays in lockstep with the mainline features.
 
 ### Quick Start
 
-Use the provided development scripts for common tasks:
+**Interactive Menu (Recommended):**
 
-**Windows:**
+Simply run the script without arguments to get an interactive menu:
+
 ```cmd
-dev.bat help
+dev.bat
 ```
 
-**Linux/macOS:**
+**Or use commands directly:**
+
 ```bash
-./dev.sh help
+dev.bat help    # Show all commands
+dev.bat dev     # Start development server
+dev.bat build   # Build production binary
 ```
 
 ### Documentation

@@ -17,16 +17,20 @@
 
 ### 快速开始
 
-使用提供的开发脚本执行常见任务：
+**交互式菜单（推荐）：**
 
-**Windows:**
+直接运行脚本即可获得交互式菜单：
+
 ```cmd
-dev.bat help
+dev.bat
 ```
 
-**Linux/macOS:**
+**或直接使用命令：**
+
 ```bash
-./dev.sh help
+dev.bat help    # 显示所有命令
+dev.bat dev     # 启动开发服务器
+dev.bat build   # 构建生产版本
 ```
 
 ### 文档

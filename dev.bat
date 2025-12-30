@@ -22,7 +22,7 @@ set "PID_FILE=.backend.pid"
 :: Parse command
 set "CMD=%~1"
 if "%CMD%"=="" (
-    call :show_help
+    call :show_menu
     exit /b 0
 )
 
@@ -106,6 +106,68 @@ echo %YELLOW%Utilities:%RESET%
 echo   quota, q            Check provider quotas
 echo   verify-creds        Verify all credentials
 echo   help, h             Show this help message
+exit /b 0
+
+:show_menu
+cls
+echo.
+echo %CYAN%========================================%RESET%
+echo %CYAN%  CLIProxyAPIPlus Development Menu%RESET%
+echo %CYAN%========================================%RESET%
+echo.
+echo %YELLOW%Development:%RESET%
+echo   %GREEN%1%RESET%. Install dependencies
+echo   %GREEN%2%RESET%. Start development server
+echo   %GREEN%3%RESET%. Build for production
+echo   %GREEN%4%RESET%. Run tests
+echo   %GREEN%5%RESET%. Run linter
+echo   %GREEN%6%RESET%. Format code
+echo   %GREEN%7%RESET%. Clean build artifacts
+echo.
+echo %YELLOW%Backend:%RESET%
+echo   %GREEN%8%RESET%. Start backend
+echo   %GREEN%9%RESET%. Stop backend
+echo   %GREEN%10%RESET%. Restart backend
+echo   %GREEN%11%RESET%. Check backend status
+echo.
+echo %YELLOW%Authentication:%RESET%
+echo   %GREEN%12%RESET%. Login menu
+echo   %GREEN%13%RESET%. Check quotas
+echo   %GREEN%14%RESET%. Verify credentials
+echo.
+echo %YELLOW%Other:%RESET%
+echo   %GREEN%15%RESET%. Show help
+echo   %GREEN%0%RESET%. Exit
+echo.
+set /p "choice=%CYAN%Enter your choice (0-15):%RESET% "
+
+if "%choice%"=="1" call :cmd_install & goto :menu_end
+if "%choice%"=="2" call :cmd_dev & goto :menu_end
+if "%choice%"=="3" call :cmd_build & goto :menu_end
+if "%choice%"=="4" call :cmd_test & goto :menu_end
+if "%choice%"=="5" call :cmd_lint & goto :menu_end
+if "%choice%"=="6" call :cmd_format & goto :menu_end
+if "%choice%"=="7" call :cmd_clean & goto :menu_end
+if "%choice%"=="8" call :cmd_start & goto :menu_end
+if "%choice%"=="9" call :cmd_stop & goto :menu_end
+if "%choice%"=="10" call :cmd_restart & goto :menu_end
+if "%choice%"=="11" call :cmd_status & goto :menu_end
+if "%choice%"=="12" call :cmd_login_menu & goto :menu_end
+if "%choice%"=="13" call :cmd_quota & goto :menu_end
+if "%choice%"=="14" call :cmd_verify_creds & goto :menu_end
+if "%choice%"=="15" call :show_help & goto :menu_end
+if "%choice%"=="0" exit /b 0
+
+echo.
+echo %RED%Invalid choice. Please try again.%RESET%
+timeout /t 2 /nobreak >nul
+goto :show_menu
+
+:menu_end
+echo.
+echo %CYAN%Press any key to return to menu or Ctrl+C to exit...%RESET%
+pause >nul
+goto :show_menu
 exit /b 0
 
 :cmd_install
