@@ -13,6 +13,50 @@ The Plus release stays in lockstep with the mainline features.
 - Added GitHub Copilot support (OAuth login), provided by [em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)
 - Added Kiro (AWS CodeWhisperer) support (OAuth login), provided by [fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration), [Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)
 
+## Development
+
+### Quick Start
+
+Use the provided development scripts for common tasks:
+
+**Windows:**
+```cmd
+dev.bat help
+```
+
+**Linux/macOS:**
+```bash
+./dev.sh help
+```
+
+### Documentation
+
+- **[Development Scripts Guide](docs/DEV_SCRIPTS.md)** - Complete guide for using dev.bat/dev.sh
+- **[Troubleshooting Guide](docs/TROUBLESHOOTING.md)** - Solutions for common issues, including the Gemini CLI "ALL" bug
+- **[SDK Documentation](docs/sdk-usage.md)** - SDK integration guide
+
+### Common Commands
+
+```bash
+# Install dependencies
+dev.bat install
+
+# Start development server
+dev.bat dev
+
+# Build production binary
+dev.bat build
+
+# Run tests
+dev.bat test
+
+# Login to providers
+dev.bat login
+
+# Check quotas
+dev.bat quota
+```
+
 ## Contributing
 
 This project only accepts pull requests that relate to third-party provider support. Any pull requests unrelated to third-party provider support will be rejected.

@@ -13,6 +13,50 @@
 - 新增 GitHub Copilot 支持（OAuth 登录），由[em4go](https://github.com/em4go/CLIProxyAPI/tree/feature/github-copilot-auth)提供
 - 新增 Kiro (AWS CodeWhisperer) 支持 (OAuth 登录), 由[fuko2935](https://github.com/fuko2935/CLIProxyAPI/tree/feature/kiro-integration)、[Ravens2121](https://github.com/Ravens2121/CLIProxyAPIPlus/)提供
 
+## 开发
+
+### 快速开始
+
+使用提供的开发脚本执行常见任务：
+
+**Windows:**
+```cmd
+dev.bat help
+```
+
+**Linux/macOS:**
+```bash
+./dev.sh help
+```
+
+### 文档
+
+- **[开发脚本指南](docs/DEV_SCRIPTS.md)** - dev.bat/dev.sh 完整使用指南
+- **[故障排除指南](docs/TROUBLESHOOTING.md)** - 常见问题解决方案，包括 Gemini CLI "ALL" 错误
+- **[SDK 文档](docs/sdk-usage.md)** - SDK 集成指南
+
+### 常用命令
+
+```bash
+# 安装依赖
+dev.bat install
+
+# 启动开发服务器
+dev.bat dev
+
+# 构建生产版本
+dev.bat build
+
+# 运行测试
+dev.bat test
+
+# 登录供应商
+dev.bat login
+
+# 检查配额
+dev.bat quota
+```
+
 ## 贡献
 
 该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
