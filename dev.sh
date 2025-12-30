@@ -15,7 +15,7 @@ RESET='\033[0m'
 
 # Configuration
 BACKEND_DIR="."
-BACKEND_CMD="go run cmd/main.go"
+BACKEND_CMD="go run cmd/server/main.go"
 PID_FILE=".backend.pid"
 
 # Helper functions
@@ -89,13 +89,13 @@ cmd_install() {
 # Start development server
 cmd_dev() {
     print_info "Starting development server..."
-    go run cmd/main.go
+    go run cmd/server/main.go
 }
 
 # Build for production
 cmd_build() {
     print_info "Building for production..."
-    go build -o bin/cliproxyapi cmd/main.go
+    go build -o bin/cliproxyapi cmd/server/main.go
     if [ $? -eq 0 ]; then
         print_success "Build completed: bin/cliproxyapi"
     else

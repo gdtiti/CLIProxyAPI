@@ -16,7 +16,7 @@ set "RESET=[0m"
 
 :: Configuration
 set "BACKEND_DIR=."
-set "BACKEND_CMD=go run cmd/main.go"
+set "BACKEND_CMD=go run cmd/server/main.go"
 set "PID_FILE=.backend.pid"
 
 :: Parse command
@@ -120,12 +120,12 @@ exit /b 0
 
 :cmd_dev
 echo %BLUE%Starting development server...%RESET%
-go run cmd/main.go
+go run cmd/server/main.go
 exit /b 0
 
 :cmd_build
 echo %BLUE%Building for production...%RESET%
-go build -o bin/cliproxyapi.exe cmd/main.go
+go build -o bin/cliproxyapi.exe cmd/server/main.go
 if %ERRORLEVEL% neq 0 (
     echo %RED%Build failed%RESET%
     exit /b 1
