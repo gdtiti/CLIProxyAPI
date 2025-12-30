@@ -69,16 +69,16 @@ dev.bat quota
 **Production (Stable Releases):**
 ```bash
 # Latest stable release
-docker pull eceasy/cli-proxy-api-plus:latest
+docker pull ghcr.io/your-org/cliproxyapiplus:latest
 
 # Specific version
-docker pull eceasy/cli-proxy-api-plus:v1.2.3
+docker pull ghcr.io/your-org/cliproxyapiplus:v1.2.3
 ```
 
 **Development Branches:**
 ```bash
 # Latest from CLIProxyAPIPlus-gdtiti branch (includes Gemini CLI fix)
-docker pull eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+docker pull ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti
 
 # Run the development image
 docker run -d \
@@ -86,7 +86,7 @@ docker run -d \
   -p 8317:8317 \
   -v $(pwd)/config.yaml:/CLIProxyAPI/config.yaml \
   -v ~/.gemini:/root/.gemini \
-  eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+  ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti
 ```
 
 See **[Docker Branch Build Guide](docs/DOCKER_BRANCH_BUILD.md)** for detailed instructions on using development branch images.
@@ -111,8 +111,8 @@ Fixed critical issue where selecting "ALL" during Gemini CLI login would fail si
 **Try it now:**
 ```bash
 # Using Docker
-docker pull eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
-docker run -it eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti sh
+docker pull ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti
+docker run -it ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti sh
 # Inside container: gemini-cli login
 
 # Or build from source

@@ -69,16 +69,16 @@ dev.bat quota
 **生产环境（稳定版本）：**
 ```bash
 # 最新稳定版本
-docker pull eceasy/cli-proxy-api-plus:latest
+docker pull ghcr.io/your-org/cliproxyapiplus:latest
 
 # 特定版本
-docker pull eceasy/cli-proxy-api-plus:v1.2.3
+docker pull ghcr.io/your-org/cliproxyapiplus:v1.2.3
 ```
 
 **开发分支：**
 ```bash
 # 从 CLIProxyAPIPlus-gdtiti 分支获取最新版本（包含 Gemini CLI 修复）
-docker pull eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+docker pull ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti
 
 # 运行开发镜像
 docker run -d \
@@ -86,7 +86,7 @@ docker run -d \
   -p 8317:8317 \
   -v $(pwd)/config.yaml:/CLIProxyAPI/config.yaml \
   -v ~/.gemini:/root/.gemini \
-  eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+  ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti
 ```
 
 查看 **[Docker 分支构建指南](docs/DOCKER_BRANCH_BUILD.md)** 了解如何使用开发分支镜像的详细说明。
@@ -111,8 +111,8 @@ docker run -p 8317:8317 cliproxyapi-local
 **立即试用：**
 ```bash
 # 使用 Docker
-docker pull eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
-docker run -it eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti sh
+docker pull ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti
+docker run -it ghcr.io/your-org/cliproxyapiplus:cliproxyapiplus-gdtiti sh
 # 在容器内：gemini-cli login
 
 # 或从源码构建
