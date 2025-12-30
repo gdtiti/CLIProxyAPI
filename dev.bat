@@ -112,34 +112,34 @@ exit /b 0
 cls
 echo.
 echo ========================================
-echo   CLIProxyAPIPlus Development Menu
+echo   CLIProxyAPIPlus ø™∑¢≤Àµ•
 echo ========================================
 echo.
-echo Development:
-echo   1. Install dependencies
-echo   2. Start development server
-echo   3. Build for production
-echo   4. Run tests
-echo   5. Run linter
-echo   6. Format code
-echo   7. Clean build artifacts
+echo ø™∑¢√¸¡Ó:
+echo   1. ∞≤◊∞“¿¿µ
+echo   2. ∆Ù∂Øø™∑¢∑˛ŒÒ∆˜
+echo   3. ππΩ®…˙≤˙∞Ê±æ
+echo   4. ‘À––≤‚ ‘
+echo   5. ‘À––¥˙¬ÎºÏ≤È
+echo   6. ∏Ò ΩªØ¥˙¬Î
+echo   7. «Â¿ÌππΩ®≤˙ŒÔ
 echo.
-echo Backend:
-echo   8. Start backend
-echo   9. Stop backend
-echo   10. Restart backend
-echo   11. Check backend status
+echo ∫Û∂Àπ‹¿Ì:
+echo   8. ∆Ù∂Ø∫Û∂À
+echo   9. Õ£÷π∫Û∂À
+echo   10. ÷ÿ∆Ù∫Û∂À
+echo   11. ºÏ≤È∫Û∂À◊¥Ã¨
 echo.
-echo Authentication:
-echo   12. Login menu
-echo   13. Check quotas
-echo   14. Verify credentials
+echo »œ÷§µ«¬º:
+echo   12. µ«¬º≤Àµ•
+echo   13. ºÏ≤È≈‰∂Ó
+echo   14. —È÷§∆æ÷§
 echo.
-echo Other:
-echo   15. Show help
-echo   0. Exit
+echo ∆‰À˚:
+echo   15. œ‘ æ∞Ô÷˙
+echo   0. ÕÀ≥ˆ
 echo.
-set /p "choice=Enter your choice (0-15): "
+set /p "choice=«Î ‰»Î—°œÓ (0-15): "
 
 if "%choice%"=="1" call :cmd_install & goto :menu_end
 if "%choice%"=="2" call :cmd_dev & goto :menu_end
@@ -159,123 +159,123 @@ if "%choice%"=="15" call :show_help & goto :menu_end
 if "%choice%"=="0" exit /b 0
 
 echo.
-echo %RED%Invalid choice. Please try again.%RESET%
+echo Œﬁ–ß—°œÓ£¨«Î÷ÿ ‘...
 timeout /t 2 /nobreak >nul
 goto :show_menu
 
 :menu_end
 echo.
-echo Press any key to return to menu or Ctrl+C to exit...
+echo ∞¥»Œ“‚º¸∑µªÿ≤Àµ•£¨ªÚ∞¥ Ctrl+C ÕÀ≥ˆ...
 pause >nul
 goto :show_menu
 exit /b 0
 
 :cmd_install
-echo %BLUE%Installing dependencies...%RESET%
+echo ’˝‘⁄∞≤◊∞“¿¿µ...
 go mod download
 if %ERRORLEVEL% neq 0 (
-    echo %RED%Failed to install dependencies%RESET%
+    echo ∞≤◊∞“¿¿µ ß∞‹
     exit /b 1
 )
-echo %GREEN%Dependencies installed successfully%RESET%
+echo “¿¿µ∞≤◊∞≥…π¶
 exit /b 0
 
 :cmd_dev
-echo %BLUE%Starting development server...%RESET%
+echo ’˝‘⁄∆Ù∂Øø™∑¢∑˛ŒÒ∆˜...
 go run cmd/server/main.go
 exit /b 0
 
 :cmd_build
-echo %BLUE%Building for production...%RESET%
+echo ’˝‘⁄ππΩ®…˙≤˙∞Ê±æ...
 go build -o bin/cliproxyapi.exe cmd/server/main.go
 if %ERRORLEVEL% neq 0 (
-    echo %RED%Build failed%RESET%
+    echo ππΩ® ß∞‹
     exit /b 1
 )
-echo %GREEN%Build completed: bin/cliproxyapi.exe%RESET%
+echo ππΩ®ÕÍ≥…: bin/cliproxyapi.exe
 exit /b 0
 
 :cmd_test
-echo %BLUE%Running tests...%RESET%
+echo ’˝‘⁄‘À––≤‚ ‘...
 go test ./...
 exit /b 0
 
 :cmd_lint
-echo %BLUE%Running linter...%RESET%
+echo ’˝‘⁄‘À––¥˙¬ÎºÏ≤È...
 where golangci-lint >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo %YELLOW%golangci-lint not found. Install it from: https://golangci-lint.run/usage/install/%RESET%
+    echo golangci-lint Œ¥’“µΩ°£«Î¥”“‘œ¬µÿ÷∑∞≤◊∞: https://golangci-lint.run/usage/install/
     exit /b 1
 )
 golangci-lint run
 exit /b 0
 
 :cmd_format
-echo %BLUE%Formatting code...%RESET%
+echo ’˝‘⁄∏Ò ΩªØ¥˙¬Î...
 go fmt ./...
-echo %GREEN%Code formatted%RESET%
+echo ¥˙¬Î∏Ò ΩªØÕÍ≥…
 exit /b 0
 
 :cmd_clean
-echo %BLUE%Cleaning build artifacts...%RESET%
+echo ’˝‘⁄«Â¿ÌππΩ®≤˙ŒÔ...
 if exist bin rmdir /s /q bin
 if exist dist rmdir /s /q dist
 if exist %PID_FILE% del /f %PID_FILE%
-echo %GREEN%Clean completed%RESET%
+echo «Â¿ÌÕÍ≥…
 exit /b 0
 
 :cmd_start
-echo %BLUE%Starting backend server...%RESET%
+echo ’˝‘⁄∆Ù∂Ø∫Û∂À∑˛ŒÒ∆˜...
 if exist %PID_FILE% (
-    echo %YELLOW%Backend is already running (PID file exists)%RESET%
+    echo ∫Û∂À“—‘⁄‘À–– (PID Œƒº˛¥Ê‘⁄)
     call :cmd_status
     exit /b 0
 )
 start /b "" %BACKEND_CMD%
 timeout /t 2 /nobreak >nul
-echo %GREEN%Backend started%RESET%
+echo ∫Û∂À“—∆Ù∂Ø
 exit /b 0
 
 :cmd_stop
-echo %BLUE%Stopping backend server...%RESET%
+echo ’˝‘⁄Õ£÷π∫Û∂À∑˛ŒÒ∆˜...
 if not exist %PID_FILE% (
-    echo %YELLOW%Backend is not running (no PID file)%RESET%
+    echo ∫Û∂ÀŒ¥‘À–– (Œﬁ PID Œƒº˛)
     exit /b 0
 )
 taskkill /f /im go.exe >nul 2>&1
 del /f %PID_FILE% >nul 2>&1
-echo %GREEN%Backend stopped%RESET%
+echo ∫Û∂À“—Õ£÷π
 exit /b 0
 
 :cmd_restart
-echo %BLUE%Restarting backend server...%RESET%
+echo ’˝‘⁄÷ÿ∆Ù∫Û∂À∑˛ŒÒ∆˜...
 call :cmd_stop
 timeout /t 1 /nobreak >nul
 call :cmd_start
 exit /b 0
 
 :cmd_status
-echo %BLUE%Checking backend status...%RESET%
+echo ’˝‘⁄ºÏ≤È∫Û∂À◊¥Ã¨...
 tasklist /fi "imagename eq go.exe" 2>nul | find /i "go.exe" >nul
 if %ERRORLEVEL% equ 0 (
-    echo %GREEN%Backend is running%RESET%
+    echo ∫Û∂À’˝‘⁄‘À––
 ) else (
-    echo %YELLOW%Backend is not running%RESET%
+    echo ∫Û∂ÀŒ¥‘À––
 )
 exit /b 0
 
 :cmd_login_menu
 echo.
-echo %CYAN%=== Authentication Login Menu ===%RESET%
+echo === »œ÷§µ«¬º≤Àµ• ===
 echo.
-echo %YELLOW%Select a provider:%RESET%
+echo —°‘ÒÃ·π©…Ã:
 echo   1. Kiro (AWS CodeWhisperer)
 echo   2. Codex CLI
 echo   3. Gemini CLI
 echo   4. Antigravity
-echo   5. Exit
+echo   5. ÕÀ≥ˆ
 echo.
-set /p "choice=Enter your choice (1-5): "
+set /p "choice=«Î ‰»Î—°œÓ (1-5): "
 
 if "%choice%"=="1" call :cmd_login_kiro & exit /b 0
 if "%choice%"=="2" call :cmd_login_codex & exit /b 0
@@ -283,183 +283,183 @@ if "%choice%"=="3" call :cmd_login_gemini & exit /b 0
 if "%choice%"=="4" call :cmd_login_antigravity & exit /b 0
 if "%choice%"=="5" exit /b 0
 
-echo %RED%Invalid choice%RESET%
+echo Œﬁ–ß—°œÓ
 exit /b 1
 
 :cmd_login_kiro
 echo.
-echo %CYAN%=== Kiro (AWS CodeWhisperer) Login ===%RESET%
+echo === Kiro (AWS CodeWhisperer) µ«¬º ===
 echo.
-echo %YELLOW%Select authentication method:%RESET%
-echo   1. Builder ID (Recommended)
-echo   2. Google Account
-echo   3. GitHub Account
-echo   4. Cancel
+echo —°‘Ò»œ÷§∑Ω Ω:
+echo   1. Builder ID (Õ∆ºˆ)
+echo   2. Google ’À∫≈
+echo   3. GitHub ’À∫≈
+echo   4. »°œ˚
 echo.
-set /p "method=Enter your choice (1-4): "
+set /p "method=«Î ‰»Î—°œÓ (1-4): "
 
 if "%method%"=="1" (
-    echo %BLUE%Logging in with Builder ID...%RESET%
+    echo ’˝‘⁄ π”√ Builder ID µ«¬º...
     kiro login --method builder-id
 ) else if "%method%"=="2" (
-    echo %BLUE%Logging in with Google...%RESET%
+    echo ’˝‘⁄ π”√ Google µ«¬º...
     kiro login --method google
 ) else if "%method%"=="3" (
-    echo %BLUE%Logging in with GitHub...%RESET%
+    echo ’˝‘⁄ π”√ GitHub µ«¬º...
     kiro login --method github
 ) else if "%method%"=="4" (
     exit /b 0
 ) else (
-    echo %RED%Invalid choice%RESET%
+    echo Œﬁ–ß—°œÓ
     exit /b 1
 )
 
 if %ERRORLEVEL% equ 0 (
-    echo %GREEN%Kiro login successful%RESET%
+    echo Kiro µ«¬º≥…π¶
 ) else (
-    echo %RED%Kiro login failed%RESET%
+    echo Kiro µ«¬º ß∞‹
     exit /b 1
 )
 exit /b 0
 
 :cmd_login_codex
-echo %BLUE%Logging in to Codex CLI...%RESET%
+echo ’˝‘⁄µ«¬º Codex CLI...
 codex login
 if %ERRORLEVEL% equ 0 (
-    echo %GREEN%Codex login successful%RESET%
+    echo Codex µ«¬º≥…π¶
 ) else (
-    echo %RED%Codex login failed%RESET%
+    echo Codex µ«¬º ß∞‹
     exit /b 1
 )
 exit /b 0
 
 :cmd_login_gemini
 echo.
-echo %CYAN%=== Gemini CLI Login ===%RESET%
+echo === Gemini CLI µ«¬º ===
 echo.
-echo %YELLOW%IMPORTANT: Known Issue with 'ALL' Selection%RESET%
+echo ÷ÿ“™Ã· æ: πÿ”⁄ 'ALL' —°œÓµƒ“—÷™Œ Ã‚
 echo.
-echo When prompted to select projects:
-echo   - %GREEN%DO:%RESET% Select a single, specific project ID
-echo   - %RED%DON'T:%RESET% Select "ALL" (may cause silent failure)
+echo µ±Ã· æ—°‘ÒœÓƒø ±:
+echo   - Ω®“È: —°‘Òµ•∏ˆÃÿ∂®µƒœÓƒø ID
+echo   - ≤ª“™: —°‘Ò "ALL" (ø…ƒ‹µº÷¬æ≤ƒ¨ ß∞‹)
 echo.
-echo %YELLOW%Recommended approach:%RESET%
-echo   1. Choose a project you actively use
-echo   2. Avoid test/temporary projects (e.g., csp-cli-*)
-echo   3. Ensure the Generative Language API is enabled
+echo Õ∆ºˆ∑Ω∑®:
+echo   1. —°‘Òƒ„æ≠≥£ π”√µƒœÓƒø
+echo   2. ±‹√‚≤‚ ‘/¡Ÿ ±œÓƒø (¿˝»Á csp-cli-*)
+echo   3. »∑±£“—∆Ù”√ Generative Language API
 echo.
-echo See docs/TROUBLESHOOTING.md for details
+echo œÍ«È«Î≤Œ‘ƒ docs/TROUBLESHOOTING.md
 echo.
 pause
 echo.
-echo %BLUE%Logging in to Gemini CLI...%RESET%
+echo ’˝‘⁄µ«¬º Gemini CLI...
 gemini-cli login
 
 if %ERRORLEVEL% equ 0 (
     echo.
-    echo %GREEN%Gemini login successful%RESET%
+    echo Gemini µ«¬º≥…π¶
     echo.
-    echo %BLUE%Verifying credential file...%RESET%
+    echo ’˝‘⁄—È÷§∆æ÷§Œƒº˛...
     call :verify_gemini_creds
 ) else (
-    echo %RED%Gemini login failed%RESET%
+    echo Gemini µ«¬º ß∞‹
     echo.
-    echo %YELLOW%Troubleshooting tips:%RESET%
-    echo   1. Check if you selected a single project (not ALL)
-    echo   2. Verify the project has required APIs enabled
-    echo   3. See docs/TROUBLESHOOTING.md for more help
+    echo π ’œ≈≈≥˝Ã· æ:
+    echo   1. ºÏ≤È «∑Ò—°‘Ò¡Àµ•∏ˆœÓƒø (∂¯∑« ALL)
+    echo   2. —È÷§œÓƒø «∑Ò“—∆Ù”√À˘–Ëµƒ API
+    echo   3. œÍ«È«Î≤Œ‘ƒ docs/TROUBLESHOOTING.md
     exit /b 1
 )
 exit /b 0
 
 :verify_gemini_creds
 if exist "%USERPROFILE%\.gemini\credentials.json" (
-    echo %GREEN%‚úì Credential file found%RESET%
-    echo   Location: %USERPROFILE%\.gemini\credentials.json
+    echo °Ã ’“µΩ∆æ÷§Œƒº˛
+    echo   Œª÷√: %USERPROFILE%\.gemini\credentials.json
 ) else if exist "%USERPROFILE%\.gemini\config.json" (
-    echo %GREEN%‚úì Config file found%RESET%
-    echo   Location: %USERPROFILE%\.gemini\config.json
+    echo °Ã ’“µΩ≈‰÷√Œƒº˛
+    echo   Œª÷√: %USERPROFILE%\.gemini\config.json
 ) else (
-    echo %RED%‚úó No credential file found%RESET%
+    echo °¡ Œ¥’“µΩ∆æ÷§Œƒº˛
     echo.
-    echo %YELLOW%This may indicate the 'ALL' bug occurred.%RESET%
-    echo Please try logging in again with a single project.
-    echo See docs/TROUBLESHOOTING.md for details.
+    echo ’‚ø…ƒ‹±Ì æ∑¢…˙¡À 'ALL' ¥ÌŒÛ°£
+    echo «Î≥¢ ‘ π”√µ•∏ˆœÓƒø÷ÿ–¬µ«¬º°£
+    echo œÍ«È«Î≤Œ‘ƒ docs/TROUBLESHOOTING.md
     exit /b 1
 )
 exit /b 0
 
 :cmd_login_antigravity
-echo %BLUE%Logging in to Antigravity...%RESET%
+echo ’˝‘⁄µ«¬º Antigravity...
 antigravity login
 if %ERRORLEVEL% equ 0 (
-    echo %GREEN%Antigravity login successful%RESET%
+    echo Antigravity µ«¬º≥…π¶
 ) else (
-    echo %RED%Antigravity login failed%RESET%
+    echo Antigravity µ«¬º ß∞‹
     exit /b 1
 )
 exit /b 0
 
 :cmd_quota
-echo %BLUE%Checking provider quotas...%RESET%
+echo ’˝‘⁄ºÏ≤ÈÃ·π©…Ã≈‰∂Ó...
 echo.
 
-echo %CYAN%=== Kiro (AWS CodeWhisperer) ===%RESET%
+echo === Kiro (AWS CodeWhisperer) ===
 kiro quota 2>nul
-if %ERRORLEVEL% neq 0 echo %YELLOW%Not logged in or command not available%RESET%
+if %ERRORLEVEL% neq 0 echo Œ¥µ«¬ºªÚ√¸¡Ó≤ªø…”√
 echo.
 
-echo %CYAN%=== Codex CLI ===%RESET%
+echo === Codex CLI ===
 codex quota 2>nul
-if %ERRORLEVEL% neq 0 echo %YELLOW%Not logged in or command not available%RESET%
+if %ERRORLEVEL% neq 0 echo Œ¥µ«¬ºªÚ√¸¡Ó≤ªø…”√
 echo.
 
-echo %CYAN%=== Gemini CLI ===%RESET%
+echo === Gemini CLI ===
 gemini-cli quota 2>nul
-if %ERRORLEVEL% neq 0 echo %YELLOW%Not logged in or command not available%RESET%
+if %ERRORLEVEL% neq 0 echo Œ¥µ«¬ºªÚ√¸¡Ó≤ªø…”√
 echo.
 
-echo %CYAN%=== Antigravity ===%RESET%
+echo === Antigravity ===
 antigravity quota 2>nul
-if %ERRORLEVEL% neq 0 echo %YELLOW%Not logged in or command not available%RESET%
+if %ERRORLEVEL% neq 0 echo Œ¥µ«¬ºªÚ√¸¡Ó≤ªø…”√
 
 exit /b 0
 
 :cmd_verify_creds
-echo %BLUE%Verifying credentials...%RESET%
+echo ’˝‘⁄—È÷§∆æ÷§...
 echo.
 
-echo %CYAN%Checking Kiro credentials...%RESET%
+echo ºÏ≤È Kiro ∆æ÷§...
 if exist "%USERPROFILE%\.kiro\credentials" (
-    echo %GREEN%‚úì Kiro credentials found%RESET%
+    echo °Ã ’“µΩ Kiro ∆æ÷§
 ) else (
-    echo %YELLOW%‚úó Kiro credentials not found%RESET%
+    echo °¡ Œ¥’“µΩ Kiro ∆æ÷§
 )
 
 echo.
-echo %CYAN%Checking Codex credentials...%RESET%
+echo ºÏ≤È Codex ∆æ÷§...
 if exist "%USERPROFILE%\.codex\credentials.json" (
-    echo %GREEN%‚úì Codex credentials found%RESET%
+    echo °Ã ’“µΩ Codex ∆æ÷§
 ) else (
-    echo %YELLOW%‚úó Codex credentials not found%RESET%
+    echo °¡ Œ¥’“µΩ Codex ∆æ÷§
 )
 
 echo.
-echo %CYAN%Checking Gemini credentials...%RESET%
+echo ºÏ≤È Gemini ∆æ÷§...
 if exist "%USERPROFILE%\.gemini\credentials.json" (
-    echo %GREEN%‚úì Gemini credentials found%RESET%
+    echo °Ã ’“µΩ Gemini ∆æ÷§
 ) else if exist "%USERPROFILE%\.gemini\config.json" (
-    echo %GREEN%‚úì Gemini config found%RESET%
+    echo °Ã ’“µΩ Gemini ≈‰÷√
 ) else (
-    echo %YELLOW%‚úó Gemini credentials not found%RESET%
+    echo °¡ Œ¥’“µΩ Gemini ∆æ÷§
 )
 
 echo.
-echo %CYAN%Checking Antigravity credentials...%RESET%
+echo ºÏ≤È Antigravity ∆æ÷§...
 if exist "%USERPROFILE%\.antigravity\credentials" (
-    echo %GREEN%‚úì Antigravity credentials found%RESET%
+    echo °Ã ’“µΩ Antigravity ∆æ÷§
 ) else (
-    echo %YELLOW%‚úó Antigravity credentials not found%RESET%
+    echo °¡ Œ¥’“µΩ Antigravity ∆æ÷§
 )
 
 exit /b 0
