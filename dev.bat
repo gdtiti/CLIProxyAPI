@@ -111,35 +111,35 @@ exit /b 0
 :show_menu
 cls
 echo.
-echo %CYAN%========================================%RESET%
-echo %CYAN%  CLIProxyAPIPlus Development Menu%RESET%
-echo %CYAN%========================================%RESET%
+echo ========================================
+echo   CLIProxyAPIPlus Development Menu
+echo ========================================
 echo.
-echo %YELLOW%Development:%RESET%
-echo   %GREEN%1%RESET%. Install dependencies
-echo   %GREEN%2%RESET%. Start development server
-echo   %GREEN%3%RESET%. Build for production
-echo   %GREEN%4%RESET%. Run tests
-echo   %GREEN%5%RESET%. Run linter
-echo   %GREEN%6%RESET%. Format code
-echo   %GREEN%7%RESET%. Clean build artifacts
+echo Development:
+echo   1. Install dependencies
+echo   2. Start development server
+echo   3. Build for production
+echo   4. Run tests
+echo   5. Run linter
+echo   6. Format code
+echo   7. Clean build artifacts
 echo.
-echo %YELLOW%Backend:%RESET%
-echo   %GREEN%8%RESET%. Start backend
-echo   %GREEN%9%RESET%. Stop backend
-echo   %GREEN%10%RESET%. Restart backend
-echo   %GREEN%11%RESET%. Check backend status
+echo Backend:
+echo   8. Start backend
+echo   9. Stop backend
+echo   10. Restart backend
+echo   11. Check backend status
 echo.
-echo %YELLOW%Authentication:%RESET%
-echo   %GREEN%12%RESET%. Login menu
-echo   %GREEN%13%RESET%. Check quotas
-echo   %GREEN%14%RESET%. Verify credentials
+echo Authentication:
+echo   12. Login menu
+echo   13. Check quotas
+echo   14. Verify credentials
 echo.
-echo %YELLOW%Other:%RESET%
-echo   %GREEN%15%RESET%. Show help
-echo   %GREEN%0%RESET%. Exit
+echo Other:
+echo   15. Show help
+echo   0. Exit
 echo.
-set /p "choice=%CYAN%Enter your choice (0-15):%RESET% "
+set /p "choice=Enter your choice (0-15): "
 
 if "%choice%"=="1" call :cmd_install & goto :menu_end
 if "%choice%"=="2" call :cmd_dev & goto :menu_end
@@ -165,7 +165,7 @@ goto :show_menu
 
 :menu_end
 echo.
-echo %CYAN%Press any key to return to menu or Ctrl+C to exit...%RESET%
+echo Press any key to return to menu or Ctrl+C to exit...
 pause >nul
 goto :show_menu
 exit /b 0
