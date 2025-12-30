@@ -28,6 +28,17 @@ auths/*
 
 # Documentation
 docs/*
+!docs/sdk-*.md
+!docs/GEMINI_ALL_FIX.md
+!docs/TROUBLESHOOTING.md
+!docs/FIX_SUMMARY.md
+!docs/TEST_PLAN.md
+!docs/DOCKER_BRANCH_BUILD.md
+!docs/QUICK_START_TESTING.md
+!docs/GITHUB_ACTIONS_SETUP.md
+!docs/COMPLETE_SUMMARY.md
+!docs/DEV_SCRIPTS.md
+!docs/README.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

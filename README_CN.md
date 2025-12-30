@@ -36,7 +36,8 @@ dev.bat build   # 构建生产版本
 ### 文档
 
 - **[开发脚本指南](docs/DEV_SCRIPTS.md)** - dev.bat/dev.sh 完整使用指南
-- **[故障排除指南](docs/TROUBLESHOOTING.md)** - 常见问题解决方案，包括 Gemini CLI "ALL" 错误
+- **[故障排除指南](docs/TROUBLESHOOTING.md)** - 常见问题解决方案，包括 Gemini CLI "ALL" 错误（已修复）
+- **[Docker 分支构建指南](docs/DOCKER_BRANCH_BUILD.md)** - 从开发分支构建和使用 Docker 镜像
 - **[SDK 文档](docs/sdk-usage.md)** - SDK 集成指南
 
 ### 常用命令
@@ -60,6 +61,66 @@ dev.bat login
 # 检查配额
 dev.bat quota
 ```
+
+## Docker
+
+### 使用预构建镜像
+
+**生产环境（稳定版本）：**
+```bash
+# 最新稳定版本
+docker pull eceasy/cli-proxy-api-plus:latest
+
+# 特定版本
+docker pull eceasy/cli-proxy-api-plus:v1.2.3
+```
+
+**开发分支：**
+```bash
+# 从 CLIProxyAPIPlus-gdtiti 分支获取最新版本（包含 Gemini CLI 修复）
+docker pull eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+
+# 运行开发镜像
+docker run -d \
+  --name cliproxyapi-dev \
+  -p 8317:8317 \
+  -v $(pwd)/config.yaml:/CLIProxyAPI/config.yaml \
+  -v ~/.gemini:/root/.gemini \
+  eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+```
+
+查看 **[Docker 分支构建指南](docs/DOCKER_BRANCH_BUILD.md)** 了解如何使用开发分支镜像的详细说明。
+
+### 本地构建
+
+```bash
+docker build -t cliproxyapi-local .
+docker run -p 8317:8317 cliproxyapi-local
+```
+
+## 最近更新
+
+### ✅ Gemini CLI "ALL" 选项修复（CLIProxyAPIPlus-gdtiti 分支）
+
+修复了选择 "ALL" 时 Gemini CLI 登录静默失败的关键问题：
+- ✅ 现在会跳过有问题的项目并继续处理其他项目
+- ✅ 为成功激活的项目保存凭证
+- ✅ 为失败的项目提供清晰的警告信息
+- ✅ 报告成功和失败的汇总信息
+
+**立即试用：**
+```bash
+# 使用 Docker
+docker pull eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti
+docker run -it eceasy/cli-proxy-api-plus:cliproxyapiplus-gdtiti sh
+# 在容器内：gemini-cli login
+
+# 或从源码构建
+git checkout CLIProxyAPIPlus-gdtiti
+go run cmd/server/main.go
+```
+
+查看 [docs/GEMINI_ALL_FIX.md](docs/GEMINI_ALL_FIX.md) 了解技术细节。
 
 ## 贡献
 
