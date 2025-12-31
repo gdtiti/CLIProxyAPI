@@ -663,6 +663,175 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 	c.JSON(200, gin.H{"status": "ok"})
 }
 
+// RemoveProjectFromAuthFile removes a specific project from a multi-project Gemini credential.
+// If only one project remains after removal, the file is renamed to single-project format.
+// If no projects remain, the file is deleted entirely.
+// PATCH /v0/management/auth-files/remove-project
+func (h *Handler) RemoveProjectFromAuthFile(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name      string `json:"name"`
+		ProjectID string `json:"project_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	projectToRemove := strings.TrimSpace(req.ProjectID)
+
+	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid name"})
+		return
+	}
+	if projectToRemove == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "project_id is required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if !filepath.IsAbs(full) {
+		if abs, errAbs := filepath.Abs(full); errAbs == nil {
+			full = abs
+		}
+	}
+
+	// Read existing credential file
+	data, err := os.ReadFile(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "file not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", err)})
+		}
+		return
+	}
+
+	// Parse credential metadata
+	var metadata map[string]any
+	if err = json.Unmarshal(data, &metadata); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid credential file format"})
+		return
+	}
+
+	// Extract project_id field
+	projectIDRaw, _ := metadata["project_id"].(string)
+	projectIDRaw = strings.TrimSpace(projectIDRaw)
+	if projectIDRaw == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "credential has no project_id"})
+		return
+	}
+
+	// Split into individual projects
+	parts := strings.Split(projectIDRaw, ",")
+	var remaining []string
+	found := false
+	for _, part := range parts {
+		id := strings.TrimSpace(part)
+		if id == "" {
+			continue
+		}
+		if id == projectToRemove {
+			found = true
+			continue
+		}
+		remaining = append(remaining, id)
+	}
+
+	if !found {
+		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("project %s not found in credential", projectToRemove)})
+		return
+	}
+
+	email, _ := metadata["email"].(string)
+	email = strings.TrimSpace(email)
+
+	// Case 1: No projects remaining - delete the file
+	if len(remaining) == 0 {
+		if err = os.Remove(full); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to delete file: %v", err)})
+			return
+		}
+		if err = h.deleteTokenRecord(ctx, full); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		h.disableAuth(ctx, full)
+		c.JSON(http.StatusOK, gin.H{"status": "deleted", "message": "credential file deleted (no projects remaining)"})
+		return
+	}
+
+	// Case 2: One project remaining - rename to single-project format
+	if len(remaining) == 1 {
+		metadata["project_id"] = remaining[0]
+		newData, errMarshal := json.MarshalIndent(metadata, "", "  ")
+		if errMarshal != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to serialize credential"})
+			return
+		}
+
+		newName := geminiAuth.CredentialFileName(email, remaining[0], true)
+		newPath := filepath.Join(h.cfg.AuthDir, newName)
+
+		// Write to new file
+		if err = os.WriteFile(newPath, newData, 0600); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write new file: %v", err)})
+			return
+		}
+
+		// Remove old file
+		if err = os.Remove(full); err != nil {
+			// Try to clean up new file on failure
+			_ = os.Remove(newPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to remove old file: %v", err)})
+			return
+		}
+
+		// Update auth manager
+		if err = h.deleteTokenRecord(ctx, full); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		h.disableAuth(ctx, full)
+		_ = h.registerAuthFromFile(ctx, newPath, newData)
+
+		c.JSON(http.StatusOK, gin.H{
+			"status":   "renamed",
+			"message":  "credential renamed to single-project format",
+			"new_name": newName,
+		})
+		return
+	}
+
+	// Case 3: Multiple projects remaining - update the file
+	metadata["project_id"] = strings.Join(remaining, ", ")
+	newData, errMarshal := json.MarshalIndent(metadata, "", "  ")
+	if errMarshal != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to serialize credential"})
+		return
+	}
+
+	if err = os.WriteFile(full, newData, 0600); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to write file: %v", err)})
+		return
+	}
+
+	// Re-register to trigger virtual auth regeneration
+	_ = h.registerAuthFromFile(ctx, full, newData)
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":             "updated",
+		"message":            "project removed from credential",
+		"remaining_projects": remaining,
+	})
+}
+
 func (h *Handler) authIDForPath(path string) string {
 	path = strings.TrimSpace(path)
 	if path == "" {
