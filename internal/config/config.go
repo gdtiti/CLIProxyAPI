@@ -92,6 +92,9 @@ type Config struct {
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
 
+	// GeminiCLI groups configuration for Gemini CLI client
+	GeminiCLI GeminiCLIConfig `yaml:"gemini-cli" json:"gemini-cli"`
+
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
 
@@ -125,6 +128,27 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// GeminiCLIConfig nests Gemini CLI related options under 'gemini-cli'.
+type GeminiCLIConfig struct {
+	// CodeAssistEndpoint is the Gemini CLI Code Assist API endpoint
+	CodeAssistEndpoint string `yaml:"code-assist-endpoint" json:"code-assist-endpoint"`
+
+	// OAuthEndpoint is the OAuth2 authentication endpoint
+	OAuthEndpoint string `yaml:"oauth-endpoint" json:"oauth-endpoint"`
+
+	// GoogleApisEndpoint is the Google APIs base endpoint
+	GoogleApisEndpoint string `yaml:"google-apis-endpoint" json:"google-apis-endpoint"`
+
+	// ResourceManagerEndpoint is the Resource Manager API endpoint
+	ResourceManagerEndpoint string `yaml:"resource-manager-endpoint" json:"resource-manager-endpoint"`
+
+	// ServiceUsageEndpoint is the Service Usage API endpoint
+	ServiceUsageEndpoint string `yaml:"service-usage-endpoint" json:"service-usage-endpoint"`
+
+	// ProxyURL overrides the global proxy setting for Gemini CLI if provided
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
 
 // RemoteManagement holds management API configuration under 'remote-management'.
@@ -482,6 +506,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Apply environment variable overrides
+	applyEnvironmentOverrides(&cfg)
+
 	var legacy legacyConfigData
 	if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
 		if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
@@ -559,6 +586,34 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// applyEnvironmentOverrides applies environment variable overrides to the configuration
+func applyEnvironmentOverrides(cfg *Config) {
+	// Override Gemini CLI configuration from environment variables
+	if codeAssistEndpoint := os.Getenv("GEMINI_CODE_ASSIST_ENDPOINT"); codeAssistEndpoint != "" {
+		cfg.GeminiCLI.CodeAssistEndpoint = codeAssistEndpoint
+	}
+	if oauthEndpoint := os.Getenv("GEMINI_OAUTH_ENDPOINT"); oauthEndpoint != "" {
+		cfg.GeminiCLI.OAuthEndpoint = oauthEndpoint
+	}
+	if googleApisEndpoint := os.Getenv("GEMINI_GOOGLE_APIS_ENDPOINT"); googleApisEndpoint != "" {
+		cfg.GeminiCLI.GoogleApisEndpoint = googleApisEndpoint
+	}
+	if resourceManagerEndpoint := os.Getenv("GEMINI_RESOURCE_MANAGER_ENDPOINT"); resourceManagerEndpoint != "" {
+		cfg.GeminiCLI.ResourceManagerEndpoint = resourceManagerEndpoint
+	}
+	if serviceUsageEndpoint := os.Getenv("GEMINI_SERVICE_USAGE_ENDPOINT"); serviceUsageEndpoint != "" {
+		cfg.GeminiCLI.ServiceUsageEndpoint = serviceUsageEndpoint
+	}
+
+	// Override remote management configuration from environment variables
+	if allowRemote := os.Getenv("REMOTE_MANAGEMENT_ALLOW_REMOTE"); allowRemote != "" {
+		cfg.RemoteManagement.AllowRemote = allowRemote == "true" || allowRemote == "1"
+	}
+	if secretKey := os.Getenv("REMOTE_MANAGEMENT_SECRET_KEY"); secretKey != "" {
+		cfg.RemoteManagement.SecretKey = secretKey
+	}
 }
 
 // SanitizeOAuthModelMappings normalizes and deduplicates global OAuth model name mappings.
@@ -1619,4 +1674,48 @@ func removeLegacyAuthBlock(root *yaml.Node) {
 		return
 	}
 	removeMapKey(root, "auth")
+}
+
+// GetCodeAssistEndpoint returns the Code Assist endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetCodeAssistEndpoint() string {
+	if c.CodeAssistEndpoint != "" {
+		return c.CodeAssistEndpoint
+	}
+	return "https://cloudcode-pa.googleapis.com" // Default official endpoint
+}
+
+// GetOAuthEndpoint returns the OAuth endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetOAuthEndpoint() string {
+	if c.OAuthEndpoint != "" {
+		return c.OAuthEndpoint
+	}
+	return "https://oauth2.googleapis.com" // Default official endpoint
+}
+
+// GetGoogleApisEndpoint returns the Google APIs endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetGoogleApisEndpoint() string {
+	if c.GoogleApisEndpoint != "" {
+		return c.GoogleApisEndpoint
+	}
+	return "https://www.googleapis.com" // Default official endpoint
+}
+
+// GetTokenURL returns the token URL constructed from OAuth endpoint
+func (c *GeminiCLIConfig) GetTokenURL() string {
+	oauthEndpoint := c.GetOAuthEndpoint()
+	return fmt.Sprintf("%s/token", strings.TrimSuffix(oauthEndpoint, "/"))
+}
+
+// GetUserinfoURL returns the userinfo URL constructed from Google APIs endpoint
+func (c *GeminiCLIConfig) GetUserinfoURL() string {
+	googleapisEndpoint := c.GetGoogleApisEndpoint()
+	return fmt.Sprintf("%s/oauth2/v2/userinfo", strings.TrimSuffix(googleapisEndpoint, "/"))
+}
+
+// GetProxyURL returns the proxy URL for Gemini CLI, with fallback to global
+func (c *GeminiCLIConfig) GetProxyURL(globalProxyURL string) string {
+	if c.ProxyURL != "" {
+		return c.ProxyURL
+	}
+	return globalProxyURL
 }

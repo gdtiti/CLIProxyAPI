@@ -1,0 +1,14 @@
+# CLIProxyAPI 最小化配置 - 仅 Gemini CLI 镜像节点
+# CLIProxyAPI Minimal Configuration - Gemini CLI Mirror Only
+
+# 服务器端口
+port: 8080
+
+# 认证文件目录
+auth-dir: "./auth"
+
+# Gemini CLI 镜像节点配置
+gemini-cli:
+  code-assist-endpoint: "https://gcli-api.sukaka.top/cloudcode-pa"
+  oauth-endpoint: "https://gcli-api.sukaka.top/oauth2"
+  google-apis-endpoint: "https://gcli-api.sukaka.top/googleapis"
