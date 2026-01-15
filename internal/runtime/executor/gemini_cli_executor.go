@@ -66,7 +66,7 @@ func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 	if req == nil {
 		return nil
 	}
-	tokenSource, _, errSource := prepareGeminiCLITokenSource(req.Context(), e.cfg, auth)
+	tokenSource, _, errSource := e.prepareGeminiCLITokenSource(req.Context(), auth)
 	if errSource != nil {
 		return errSource
 	}

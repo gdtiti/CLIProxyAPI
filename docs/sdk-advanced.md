@@ -5,7 +5,7 @@ This guide explains how to extend the embedded proxy with custom providers and s
 - Register request/response translators for schema conversion
 - Register models so they appear in `/v1/models`
 
-The examples use Go 1.24+ and the v6 module path.
+The examples use Go 1.23+ and the v6 module path.
 
 ## Concepts
 

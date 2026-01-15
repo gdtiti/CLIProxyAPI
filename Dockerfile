@@ -18,7 +18,7 @@ RUN if [ "$MANAGEMENT_ASSET_VERSION" = "latest" ]; then \
     "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/${MANAGEMENT_ASSET_VERSION}/management.html" || \
   echo "Management asset download failed, will use runtime fallback"
 
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 

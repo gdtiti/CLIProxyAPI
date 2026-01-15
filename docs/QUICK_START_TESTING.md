@@ -6,7 +6,7 @@ This guide helps you quickly test the Gemini CLI "ALL" selection fix in the `CLI
 
 - Google Cloud account with multiple projects (at least 2-3)
 - At least one project with Gemini API disabled (for testing the fix)
-- Docker installed (for easiest testing) OR Go 1.24+ (for building from source)
+- Docker installed (for easiest testing) OR Go 1.23+ (for building from source)
 
 ## Option 1: Test with Docker (Recommended)
 

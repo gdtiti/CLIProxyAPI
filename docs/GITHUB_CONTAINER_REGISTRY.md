@@ -223,7 +223,7 @@ Set up automatic cleanup:
 
 Optimize image size:
 ```dockerfile
-FROM golang:1.24-alpine AS builder
+FROM golang:1.23-alpine AS builder
 # Build stage
 
 FROM alpine:3.22.0
