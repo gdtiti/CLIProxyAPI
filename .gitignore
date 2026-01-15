@@ -64,3 +64,5 @@ _bmad-output/*
 .DS_Store
 ._*
 .ace-tool/
+# Windows special files
+nul

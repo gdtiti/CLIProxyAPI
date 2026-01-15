@@ -311,7 +311,7 @@ gemini-cli login
 6. ✅ **README 更新** - 英文和中文
 
 ### 技术栈
-- **后端**: Go 1.23
+- **后端**: Go 1.24
 - **前端**: TypeScript + Vite
 - **容器**: Docker (multi-platform)
 - **CI/CD**: GitHub Actions
