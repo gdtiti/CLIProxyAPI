@@ -67,7 +67,7 @@ func (e *GeminiCLIExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth
 	if req == nil {
 		return nil
 	}
-	tokenSource, _, errSource := e.prepareGeminiCLITokenSource(req.Context(), auth)
+	tokenSource, _, errSource := prepareGeminiCLITokenSource(req.Context(), e.cfg, auth)
 	if errSource != nil {
 		return errSource
 	}
@@ -559,7 +559,7 @@ func (e *GeminiCLIExecutor) Refresh(_ context.Context, auth *cliproxyauth.Auth) 
 	return auth, nil
 }
 
-func (e *GeminiCLIExecutor) prepareGeminiCLITokenSource(ctx context.Context, auth *cliproxyauth.Auth) (oauth2.TokenSource, map[string]any, error) {
+func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth) (oauth2.TokenSource, map[string]any, error) {
 	metadata := geminiOAuthMetadata(auth)
 	if auth == nil || metadata == nil {
 		return nil, nil, fmt.Errorf("gemini-cli auth metadata missing")
@@ -597,8 +597,8 @@ func (e *GeminiCLIExecutor) prepareGeminiCLITokenSource(ctx context.Context, aut
 	}
 
 	// 使用配置的镜像端点
-	oauthEndpoint := e.cfg.GeminiCLI.GetOAuthEndpoint()
-	tokenURL := e.cfg.GeminiCLI.GetTokenURL()
+	oauthEndpoint := cfg.GeminiCLI.GetOAuthEndpoint()
+	tokenURL := cfg.GeminiCLI.GetTokenURL()
 
 	conf := &oauth2.Config{
 		ClientID:     geminiOAuthClientID,
@@ -611,7 +611,7 @@ func (e *GeminiCLIExecutor) prepareGeminiCLITokenSource(ctx context.Context, aut
 	}
 
 	ctxToken := ctx
-	if httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0); httpClient != nil {
+	if httpClient := newProxyAwareHTTPClient(ctx, cfg, auth, 0); httpClient != nil {
 		ctxToken = context.WithValue(ctxToken, oauth2.HTTPClient, httpClient)
 	}
 
