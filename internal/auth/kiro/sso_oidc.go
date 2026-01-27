@@ -479,6 +479,10 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 
 			expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
+			// Generate IDC fingerprint for consistent User-Agent across requests
+			fingerprint := GenerateIDCFingerprint()
+			log.Debugf("kiro: generated IDC fingerprint (OS: %s/%s)", fingerprint.OSType, fingerprint.OSVersion)
+
 			return &KiroTokenData{
 				AccessToken:  tokenResp.AccessToken,
 				RefreshToken: tokenResp.RefreshToken,
@@ -491,6 +495,7 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 				Email:        email,
 				StartURL:     startURL,
 				Region:       region,
+				Fingerprint:  fingerprint,
 			}, nil
 		}
 	}
@@ -735,6 +740,7 @@ func (c *SSOOIDCClient) RefreshToken(ctx context.Context, clientID, clientSecret
 		Provider:     "AWS",
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
+		Region:       defaultIDCRegion,
 	}, nil
 }
 
@@ -850,16 +856,17 @@ func (c *SSOOIDCClient) LoginWithBuilderID(ctx context.Context) (*KiroTokenData,
 				ClientID:     regResp.ClientID,
 				ClientSecret: regResp.ClientSecret,
 				Email:        email,
+				Region:       defaultIDCRegion,
 			}, nil
-		}
-	}
+			}
+			}
 
-	// Close browser on timeout for better UX
-	if err := browser.CloseBrowser(); err != nil {
-		log.Debugf("Failed to close browser on timeout: %v", err)
-	}
-	return nil, fmt.Errorf("authorization timed out")
-}
+			// Close browser on timeout for better UX
+			if err := browser.CloseBrowser(); err != nil {
+			log.Debugf("Failed to close browser on timeout: %v", err)
+			}
+			return nil, fmt.Errorf("authorization timed out")
+			}
 
 // FetchUserEmail retrieves the user's email from AWS SSO OIDC userinfo endpoint.
 // Falls back to JWT parsing if userinfo fails.
@@ -1366,6 +1373,7 @@ func (c *SSOOIDCClient) LoginWithBuilderIDAuthCode(ctx context.Context) (*KiroTo
 			ClientID:     regResp.ClientID,
 			ClientSecret: regResp.ClientSecret,
 			Email:        email,
+			Region:       defaultIDCRegion,
 		}, nil
 	}
 }

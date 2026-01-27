@@ -66,3 +66,4 @@ _bmad-output/*
 .ace-tool/
 # Windows special files
 nul
+*.bak
