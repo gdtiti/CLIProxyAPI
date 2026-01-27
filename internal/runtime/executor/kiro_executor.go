@@ -373,19 +373,19 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 		return kiroEndpointConfigs
 	}
 
-	// For IDC (Identity Center) enterprise auth, use Amazon Q endpoint with CLI origin ONLY
-	// IDC enterprise accounts have different subscription types that require CLI origin
-	// Error "Your subscription does not support this application" occurs when using wrong origin
+	// For IDC (Identity Center) enterprise auth, use Amazon Q endpoint with AI_EDITOR origin
+	// Based on kiro_proxy Python implementation which works for enterprise accounts
+	// Python version uses: https://q.us-east-1.amazonaws.com/generateAssistantResponse with AI_EDITOR origin
 	if auth.Metadata != nil {
 		authMethod, _ := auth.Metadata["auth_method"].(string)
 		if authMethod == "idc" {
-			log.Debugf("kiro: IDC auth detected, using Amazon Q endpoint (CLI origin)")
-			// Return ONLY Amazon Q endpoint for IDC enterprise accounts
+			log.Debugf("kiro: IDC auth detected, using Amazon Q endpoint (AI_EDITOR origin, matching kiro_proxy)")
+			// Return Amazon Q endpoint with AI_EDITOR origin (matching kiro_proxy Python implementation)
 			return []kiroEndpointConfig{
 				{
-					URL:       "https://q.us-east-1.amazonaws.com/",
-					Origin:    "CLI",
-					AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
+					URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+					Origin:    "AI_EDITOR",
+					AmzTarget: "AmazonQDeveloperStreamingService.GenerateAssistantResponse",
 					Name:      "AmazonQ",
 				},
 			}
@@ -484,52 +484,22 @@ func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 func (e *KiroExecutor) Identifier() string { return "kiro" }
 
 // applyDynamicFingerprint applies token-specific fingerprint headers to the request
-// For IDC auth, uses Amazon Q CLI style headers with fingerprint from credentials
+// For IDC auth, uses Kiro IDE style headers (matching kiro_proxy Python implementation)
 // For other auth types (Builder ID, Social), uses Kiro IDE style headers
 func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
+	// Both IDC and Builder ID now use the same Kiro IDE style headers
+	// This matches the kiro_proxy Python implementation which works for enterprise accounts
+	tokenKey := getTokenKey(auth)
+	fp := getGlobalFingerprintManager().GetFingerprint(tokenKey)
+	
+	req.Header.Set("User-Agent", fp.BuildUserAgent())
+	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
+	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+	
 	if isIDCAuth(auth) {
-		// IDC enterprise accounts use Amazon Q endpoint with CLI origin
-		// Try to get fingerprint from auth metadata (persisted in credentials JSON)
-		var fp *kiroauth.IDCFingerprint
-		if auth != nil && auth.Metadata != nil {
-			if fpData, ok := auth.Metadata["fingerprint"].(map[string]interface{}); ok {
-				osType, _ := fpData["osType"].(string)
-				osVersion, _ := fpData["osVersion"].(string)
-				sdkVersion, _ := fpData["sdkVersion"].(string)
-				rustVersion, _ := fpData["rustVersion"].(string)
-				if osType != "" {
-					fp = &kiroauth.IDCFingerprint{
-						OSType:      osType,
-						OSVersion:   osVersion,
-						SDKVersion:  sdkVersion,
-						RustVersion: rustVersion,
-					}
-				}
-			}
-		}
-		
-		// If no fingerprint in credentials, generate a new one (for backward compatibility)
-		if fp == nil {
-			fp = kiroauth.GenerateIDCFingerprint()
-			log.Warnf("kiro: IDC fingerprint not found in credentials, generated new one (OS: %s, SDK: %s)", 
-				fp.OSType, fp.SDKVersion)
-		}
-		
-		// Use IDC fingerprint-based User-Agent (Amazon Q CLI style)
-		req.Header.Set("User-Agent", fp.BuildUserAgent())
-		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-		log.Debugf("kiro: IDC auth, using fingerprint (OS: %s/%s, SDK: %s, Rust: %s)", 
-			fp.OSType, fp.OSVersion, fp.SDKVersion, fp.RustVersion)
+		log.Debugf("kiro: IDC auth, using Kiro IDE style headers (SDK:%s, OS:%s/%s, Kiro:%s)",
+			fp.SDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 	} else {
-		// Builder ID / Social auth uses CodeWhisperer endpoint with AI_EDITOR origin
-		// Use dynamic fingerprint-based Kiro IDE style headers
-		tokenKey := getTokenKey(auth)
-		fp := getGlobalFingerprintManager().GetFingerprint(tokenKey)
-		
-		req.Header.Set("User-Agent", fp.BuildUserAgent())
-		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
-		
 		log.Debugf("kiro: using dynamic fingerprint for token %s (SDK:%s, OS:%s/%s, Kiro:%s)",
 			tokenKey[:8]+"...", fp.SDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 	}

@@ -60,6 +60,9 @@ _bmad/*
 _bmad-output/*
 .mcp/cache/
 
+# Reference code (not part of this project)
+kiro_proxy/
+
 # macOS
 .DS_Store
 ._*
