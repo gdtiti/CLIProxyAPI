@@ -18,8 +18,8 @@ require (
 	github.com/klauspost/compress v1.17.4
 	github.com/lib/pq v1.10.9
 	github.com/minio/minio-go/v7 v7.0.66
-	github.com/refraction-networking/utls v1.8.2
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c
+	github.com/refraction-networking/utls v1.8.2
 	github.com/shopspring/decimal v1.4.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.11.1
