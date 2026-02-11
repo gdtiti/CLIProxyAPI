@@ -115,9 +115,11 @@ type KiroAssistantResponseMessage struct {
 
 // KiroToolUse represents a tool invocation by the assistant
 type KiroToolUse struct {
-	ToolUseID string                 `json:"toolUseId"`
-	Name      string                 `json:"name"`
-	Input     map[string]interface{} `json:"input"`
+	ToolUseID      string                 `json:"toolUseId"`
+	Name           string                 `json:"name"`
+	Input          map[string]interface{} `json:"input"`
+	IsTruncated    bool                   `json:"-"` // Internal flag, not serialized
+	TruncationInfo *TruncationInfo        `json:"-"` // Truncation details, not serialized
 }
 
 // ConvertClaudeRequestToKiro converts a Claude API request to Kiro format.
@@ -242,10 +244,10 @@ IMPORTANT: Always attempt to fetch information FIRST before declining. You CAN a
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
 	// When set to "enabled", Kiro returns reasoning content as official reasoningContentEvent
 	// rather than inline <thinking> tags in assistantResponseEvent.
-	// We use a high max_thinking_length to allow extensive reasoning.
+	// We cap max_thinking_length to reserve space for tool outputs and prevent truncation.
 	if thinkingEnabled {
 		thinkingHint := `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
+<max_thinking_length>16000</max_thinking_length>`
 		if systemPrompt != "" {
 			systemPrompt = thinkingHint + "\n\n" + systemPrompt
 		} else {
@@ -606,18 +608,22 @@ func processMessages(messages gjson.Result, modelID, origin string) ([]KiroHisto
 
 		if role == "user" {
 			userMsg, toolResults := BuildUserMessageStruct(msg, modelID, origin)
+			// CRITICAL: Kiro API requires content to be non-empty for ALL user messages
+			// This includes both history messages and the current message.
+			// When user message contains only tool_result (no text), content will be empty.
+			// This commonly happens in compaction requests from OpenCode.
+			if strings.TrimSpace(userMsg.Content) == "" {
+				if len(toolResults) > 0 {
+					userMsg.Content = kirocommon.DefaultUserContentWithToolResults
+				} else {
+					userMsg.Content = kirocommon.DefaultUserContent
+				}
+				log.Debugf("kiro: user content was empty, using default: %s", userMsg.Content)
+			}
 			if isLastMessage {
 				currentUserMsg = &userMsg
 				currentToolResults = toolResults
 			} else {
-				// CRITICAL: Kiro API requires content to be non-empty for history messages too
-				if strings.TrimSpace(userMsg.Content) == "" {
-					if len(toolResults) > 0 {
-						userMsg.Content = "Tool results provided."
-					} else {
-						userMsg.Content = "Continue"
-					}
-				}
 				// For history messages, embed tool results in context
 				if len(toolResults) > 0 {
 					userMsg.UserInputMessageContext = &KiroUserInputMessageContext{
@@ -771,7 +777,35 @@ func BuildUserMessageStruct(msg gjson.Result, modelID, origin string) (KiroUserI
 				resultContent := part.Get("content")
 
 				var textContents []KiroTextContent
-				if resultContent.IsArray() {
+
+				// Check if this tool_result contains error from our SOFT_LIMIT_REACHED tool_use
+				// The client will return an error when trying to execute a tool with marker input
+				resultStr := resultContent.String()
+				isSoftLimitError := strings.Contains(resultStr, "SOFT_LIMIT_REACHED") ||
+					strings.Contains(resultStr, "_status") ||
+					strings.Contains(resultStr, "truncated") ||
+					strings.Contains(resultStr, "missing required") ||
+					strings.Contains(resultStr, "invalid input") ||
+					strings.Contains(resultStr, "Error writing file")
+
+				if isError && isSoftLimitError {
+					// Replace error content with SOFT_LIMIT_REACHED guidance
+					log.Infof("kiro: detected SOFT_LIMIT_REACHED in tool_result for %s, replacing with guidance", toolUseID)
+					softLimitMsg := `SOFT_LIMIT_REACHED
+
+Your previous tool call was incomplete due to API output size limits.
+The content was PARTIALLY transmitted but NOT executed.
+
+REQUIRED ACTION:
+1. Split your content into smaller chunks (max 300 lines per call)
+2. For file writes: Create file with first chunk, then use append for remaining
+3. Do NOT regenerate content you already attempted - continue from where you stopped
+
+STATUS: This is NOT an error. Continue with smaller chunks.`
+					textContents = append(textContents, KiroTextContent{Text: softLimitMsg})
+					// Mark as SUCCESS so Claude doesn't treat it as a failure
+					isError = false
+				} else if resultContent.IsArray() {
 					for _, item := range resultContent.Array() {
 						if item.Get("type").String() == "text" {
 							textContents = append(textContents, KiroTextContent{Text: item.Get("text").String()})
@@ -853,8 +887,21 @@ func BuildAssistantMessageStruct(msg gjson.Result) KiroAssistantResponseMessage 
 		contentBuilder.WriteString(content.String())
 	}
 
+	// CRITICAL FIX: Kiro API requires non-empty content for assistant messages
+	// This can happen with compaction requests where assistant messages have only tool_use
+	// (no text content). Without this fix, Kiro API returns "Improperly formed request" error.
+	finalContent := contentBuilder.String()
+	if strings.TrimSpace(finalContent) == "" {
+		if len(toolUses) > 0 {
+			finalContent = kirocommon.DefaultAssistantContentWithTools
+		} else {
+			finalContent = kirocommon.DefaultAssistantContent
+		}
+		log.Debugf("kiro: assistant content was empty, using default: %s", finalContent)
+	}
+
 	return KiroAssistantResponseMessage{
-		Content:  contentBuilder.String(),
+		Content:  finalContent,
 		ToolUses: toolUses,
 	}
 }
