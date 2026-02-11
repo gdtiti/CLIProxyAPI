@@ -28,7 +28,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -615,6 +614,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
+		mgmt.GET("/codex-api-key/by-plan-type", s.mgmt.GetCodexKeysByPlanType)
+		mgmt.GET("/codex-api-key/plan-types", s.mgmt.GetCodexPlanTypes)
 
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
@@ -930,10 +931,6 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 
 	if oldCfg == nil || oldCfg.DisableCooling != cfg.DisableCooling {
 		auth.SetQuotaCooldownDisabled(cfg.DisableCooling)
-	}
-
-	if oldCfg == nil || oldCfg.CodexInstructionsEnabled != cfg.CodexInstructionsEnabled {
-		misc.SetCodexInstructionsEnabled(cfg.CodexInstructionsEnabled)
 	}
 
 	if s.handlers != nil && s.handlers.AuthManager != nil {

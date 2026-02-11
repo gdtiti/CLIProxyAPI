@@ -122,6 +122,7 @@ nonstream-keepalive-interval: 0
 #   - api-key: "sk-atSM..."
 #     prefix: "test" # optional: require calls like "test/gpt-5-codex" to target this credential
 #     base-url: "https://www.example.com" # use the custom codex API endpoint
+#     plan-type: "plus" # optional: specify plan type (plus, free, or empty for general)
 #     headers:
 #       X-Custom-Header: "custom-value"
 #     proxy-url: "socks5://proxy.example.com:1080" # optional: per-key proxy override
@@ -133,6 +134,13 @@ nonstream-keepalive-interval: 0
 #       - "gpt-5-*"         # wildcard matching prefix (e.g. gpt-5-medium, gpt-5-codex)
 #       - "*-mini"          # wildcard matching suffix (e.g. gpt-5-codex-mini)
 #       - "*codex*"         # wildcard matching substring (e.g. gpt-5-codex-low)
+#   - api-key: "sk-free..."
+#     prefix: "free"
+#     base-url: "https://www.example.com"
+#     plan-type: "free" # Free tier configuration
+#     excluded-models:
+#       - "gpt-5"           # Free tier excludes premium models
+#       - "gpt-4-turbo"
 
 # Claude API keys
 # claude-api-key:

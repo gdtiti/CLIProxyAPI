@@ -392,6 +392,10 @@ type CodexKey struct {
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
 
+	// PlanType specifies the Codex subscription plan type (plus, free, or empty for general).
+	// This allows differentiation between Plus and Free tier credentials for separate management.
+	PlanType string `yaml:"plan-type,omitempty" json:"plan-type,omitempty"`
+
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
@@ -626,9 +630,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// 		cfg.legacyMigrationPending = true
 	// 	}
 	// }
-	// 	}
-	// }
->>>>>>> e17d4f8d987c5bf8de3583c783d29ed4accfb10f
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
@@ -661,9 +662,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
 	}
-
-	// Sync request authentication providers with inline API keys for backwards compatibility.
-	syncInlineAccessProvider(&cfg)
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -1980,15 +1978,4 @@ func (c *GeminiCLIConfig) GetProxyURL(globalProxyURL string) string {
 		return c.ProxyURL
 	}
 	return globalProxyURL
-}
-func syncInlineAccessProvider(cfg *Config) {
-	if cfg == nil {
-		return
-	}
-	if len(cfg.APIKeys) == 0 {
-		if provider := cfg.ConfigAPIKeyProvider(); provider != nil && len(provider.APIKeys) > 0 {
-			cfg.APIKeys = append([]string(nil), provider.APIKeys...)
-		}
-	}
-	cfg.Access.Providers = nil
 }

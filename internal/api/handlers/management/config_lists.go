@@ -843,6 +843,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		APIKey         *string              `json:"api-key"`
 		Prefix         *string              `json:"prefix"`
 		BaseURL        *string              `json:"base-url"`
+		PlanType       *string              `json:"plan-type"`
 		ProxyURL       *string              `json:"proxy-url"`
 		Models         *[]config.CodexModel `json:"models"`
 		Headers        *map[string]string   `json:"headers"`
@@ -891,6 +892,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.PlanType != nil {
+		entry.PlanType = strings.TrimSpace(*body.Value.PlanType)
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
@@ -1001,6 +1005,7 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.PlanType = strings.TrimSpace(entry.PlanType)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
@@ -1365,4 +1370,50 @@ func normalizeAPIKeysList(keys []string) []string {
 		return nil
 	}
 	return out
+}
+// GetCodexKeysByPlanType returns Codex keys filtered by plan type
+func (h *Handler) GetCodexKeysByPlanType(c *gin.Context) {
+	planType := strings.TrimSpace(c.Query("plan-type"))
+	
+	var filteredKeys []config.CodexKey
+	for _, key := range h.cfg.CodexKey {
+		keyPlanType := strings.TrimSpace(key.PlanType)
+		
+		// 匹配逻辑：
+		// - 如果查询参数为空，返回所有未设置plan-type的凭证（通用凭证）
+		// - 如果查询参数为"plus"或"free"，返回对应套餐的凭证
+		// - 如果查询参数为"all"，返回所有凭证
+		if planType == "all" {
+			filteredKeys = append(filteredKeys, key)
+		} else if planType == "" && keyPlanType == "" {
+			filteredKeys = append(filteredKeys, key)
+		} else if planType != "" && keyPlanType == planType {
+			filteredKeys = append(filteredKeys, key)
+		}
+	}
+	
+	c.JSON(200, gin.H{
+		"codex-api-key": filteredKeys,
+		"plan-type": planType,
+		"total": len(filteredKeys),
+	})
+}
+
+// GetCodexPlanTypes returns available plan types for Codex keys
+func (h *Handler) GetCodexPlanTypes(c *gin.Context) {
+	planTypes := make(map[string]int)
+	
+	for _, key := range h.cfg.CodexKey {
+		keyPlanType := strings.TrimSpace(key.PlanType)
+		if keyPlanType == "" {
+			planTypes["general"]++
+		} else {
+			planTypes[keyPlanType]++
+		}
+	}
+	
+	c.JSON(200, gin.H{
+		"plan-types": planTypes,
+		"total": len(h.cfg.CodexKey),
+	})
 }

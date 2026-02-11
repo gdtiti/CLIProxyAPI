@@ -353,13 +353,6 @@ func extractRegionFromProfileARN(profileArn string) string {
 	return ""
 }
 
-<<<<<<< HEAD
-// getKiroEndpointConfigs returns the Kiro API endpoint configuration based on auth type.
-// Different account types require different endpoints:
-// - IDC (Identity Center) enterprise accounts: Amazon Q endpoint with CLI origin
-// - Builder ID / Social auth: CodeWhisperer endpoint with AI_EDITOR origin
-// Supports override via "preferred_endpoint" in auth metadata/attributes.
-=======
 // buildKiroEndpointConfigs creates endpoint configurations for the specified region.
 // This enables dynamic region support for Enterprise/IdC users in non-us-east-1 regions.
 //
@@ -405,31 +398,12 @@ var kiroEndpointConfigs = buildKiroEndpointConfigs(kiroDefaultRegion)
 // 2. ProfileARN region - extracted from arn:aws:service:REGION:account:resource
 // 3. kiroDefaultRegion (us-east-1) - fallback
 // Note: OIDC "region" is NOT used - it's for token refresh, not API calls
->>>>>>> dcd0ae7467bdfe556d708966c4b02f26394673f7
 func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	if auth == nil {
 		return kiroEndpointConfigs
 	}
 
-<<<<<<< HEAD
-	// For IDC (Identity Center) enterprise auth, use Amazon Q endpoint with AI_EDITOR origin
-	// Based on kiro_proxy Python implementation which works for enterprise accounts
-	// Python version uses: https://q.us-east-1.amazonaws.com/generateAssistantResponse with AI_EDITOR origin
-	if auth.Metadata != nil {
-		authMethod, _ := auth.Metadata["auth_method"].(string)
-		if authMethod == "idc" {
-			log.Debugf("kiro: IDC auth detected, using Amazon Q endpoint (AI_EDITOR origin, matching kiro_proxy)")
-			// Return Amazon Q endpoint with AI_EDITOR origin (matching kiro_proxy Python implementation)
-			return []kiroEndpointConfig{
-				{
-					URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-					Origin:    "AI_EDITOR",
-					AmzTarget: "AmazonQDeveloperStreamingService.GenerateAssistantResponse",
-					Name:      "AmazonQ",
-				},
-			}
-=======
-	// Determine API region with priority: api_region > profile_arn > region > default
+	// Determine API region with priority: api_region > profile_arn > default
 	region := kiroDefaultRegion
 	regionSource := "default"
 
@@ -446,9 +420,6 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 					regionSource = "profile_arn"
 				}
 			}
-			// Note: OIDC "region" field is NOT used for API endpoint
-			// Kiro API only exists in us-east-1, while OIDC region can vary (e.g., ap-northeast-2)
-			// Using OIDC region for API calls causes DNS failures
 		}
 	}
 
@@ -458,15 +429,11 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	endpointConfigs := buildKiroEndpointConfigs(region)
 
 	// For IDC auth, use Q endpoint with AI_EDITOR origin
-	// IDC tokens work with Q endpoint using Bearer auth
-	// The difference is only in how tokens are refreshed (OIDC with clientId/clientSecret for IDC)
-	// NOT in how API calls are made - both Social and IDC use the same endpoint/origin
 	if auth.Metadata != nil {
 		authMethod, _ := auth.Metadata["auth_method"].(string)
 		if strings.ToLower(authMethod) == "idc" {
 			log.Debugf("kiro: IDC auth, using Q endpoint (region: %s)", region)
 			return endpointConfigs
->>>>>>> dcd0ae7467bdfe556d708966c4b02f26394673f7
 		}
 	}
 
@@ -572,24 +539,12 @@ func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 	
 	req.Header.Set("User-Agent", fp.BuildUserAgent())
 	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeSpec)
+	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeVibe)
 	
 	if isIDCAuth(auth) {
-<<<<<<< HEAD
 		log.Debugf("kiro: IDC auth, using Kiro IDE style headers (SDK:%s, OS:%s/%s, Kiro:%s)",
 			fp.SDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 	} else {
-=======
-		// Get token-specific fingerprint for dynamic UA generation
-		tokenKey := getTokenKey(auth)
-		fp := getGlobalFingerprintManager().GetFingerprint(tokenKey)
-
-		// Use fingerprint-generated dynamic User-Agent
-		req.Header.Set("User-Agent", fp.BuildUserAgent())
-		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentModeVibe)
-
->>>>>>> dcd0ae7467bdfe556d708966c4b02f26394673f7
 		log.Debugf("kiro: using dynamic fingerprint for token %s (SDK:%s, OS:%s/%s, Kiro:%s)",
 			tokenKey[:8]+"...", fp.SDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 	}
