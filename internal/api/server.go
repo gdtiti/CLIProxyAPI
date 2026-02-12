@@ -52,6 +52,7 @@ type serverOptionConfig struct {
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
+	usagePlugin          *usage.LoggerPlugin
 }
 
 // ServerOption customises HTTP server construction.
@@ -109,6 +110,13 @@ func WithKeepAliveEndpoint(timeout time.Duration, onTimeout func()) ServerOption
 func WithRequestLoggerFactory(factory func(*config.Config, string) logging.RequestLogger) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.requestLoggerFactory = factory
+	}
+}
+
+// WithUsagePlugin injects a LoggerPlugin into the management handler for PG-backed usage.
+func WithUsagePlugin(plugin *usage.LoggerPlugin) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usagePlugin = plugin
 	}
 }
 
@@ -260,6 +268,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
+	}
+	if optionState.usagePlugin != nil {
+		s.mgmt.SetUsagePlugin(optionState.usagePlugin)
 	}
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
@@ -502,6 +513,7 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.DELETE("/usage", s.mgmt.DeleteUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)

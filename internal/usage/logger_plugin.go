@@ -5,7 +5,9 @@ package usage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +26,13 @@ func init() {
 
 // LoggerPlugin collects in-memory request statistics for usage analysis.
 // It implements coreusage.Plugin to receive usage records emitted by the runtime.
+// 当 persistent 为 true 时，同时将数据写入 HotBuffer 和 WriteQueue（PG 持久化）。
 type LoggerPlugin struct {
-	stats *RequestStatistics
+	stats      *RequestStatistics // 内存统计，纯内存模式使用
+	hotBuffer  *HotBuffer         // PG 模式：环形缓冲
+	writeQueue *WriteQueue         // PG 模式：异步写入队列
+	pgStore    *PGStore            // PG 模式：PG 读写层
+	persistent bool                // 是否为持久化模式
 }
 
 // NewLoggerPlugin constructs a new logger plugin instance.
@@ -34,12 +41,24 @@ type LoggerPlugin struct {
 //   - *LoggerPlugin: A new logger plugin instance wired to the shared statistics store.
 func NewLoggerPlugin() *LoggerPlugin { return &LoggerPlugin{stats: defaultRequestStatistics} }
 
+// NewPersistentLoggerPlugin 创建持久化模式的 LoggerPlugin。
+// 同时维护内存统计 + HotBuffer + WriteQueue，数据异步写入 PG。
+func NewPersistentLoggerPlugin(db *sql.DB, instanceID string, opts ...WriteQueueOption) *LoggerPlugin {
+	store := NewPGStore(db, instanceID)
+	buf := NewHotBuffer(0) // 默认 10000
+	wq := NewWriteQueue(store, opts...)
+	return &LoggerPlugin{
+		stats:      defaultRequestStatistics,
+		hotBuffer:  buf,
+		writeQueue: wq,
+		pgStore:    store,
+		persistent: true,
+	}
+}
+
 // HandleUsage implements coreusage.Plugin.
-// It updates the in-memory statistics store whenever a usage record is received.
-//
-// Parameters:
-//   - ctx: The context for the usage record
-//   - record: The usage record to aggregate
+// 纯内存模式：仅更新 RequestStatistics。
+// 持久化模式：同时写 HotBuffer + WriteQueue。
 func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record) {
 	if !statisticsEnabled.Load() {
 		return
@@ -47,7 +66,79 @@ func (p *LoggerPlugin) HandleUsage(ctx context.Context, record coreusage.Record)
 	if p == nil || p.stats == nil {
 		return
 	}
+	// 内存统计始终执行
 	p.stats.Record(ctx, record)
+
+	// 持久化模式：额外写 HotBuffer + WriteQueue
+	if !p.persistent {
+		return
+	}
+	detail := p.buildDetail(ctx, record)
+	apiKey := record.APIKey
+	if apiKey == "" {
+		apiKey = resolveAPIIdentifier(ctx, record)
+	}
+	model := record.Model
+	if model == "" {
+		model = "unknown"
+	}
+	if p.hotBuffer != nil {
+		p.hotBuffer.Record(detail)
+	}
+	if p.writeQueue != nil {
+		p.writeQueue.Enqueue(apiKey, model, detail)
+	}
+}
+
+// buildDetail 从 usage record 构建 RequestDetail。
+func (p *LoggerPlugin) buildDetail(ctx context.Context, record coreusage.Record) RequestDetail {
+	ts := record.RequestedAt
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	tokens := normaliseDetail(record.Detail)
+	failed := record.Failed
+	if !failed {
+		failed = !resolveSuccess(ctx)
+	}
+	return RequestDetail{
+		Timestamp: ts,
+		Source:    record.Source,
+		AuthIndex: record.AuthIndex,
+		Tokens:    tokens,
+		Failed:    failed,
+	}
+}
+
+// Snapshot 返回统计快照。
+// 纯内存模式：直接返回 RequestStatistics.Snapshot()。
+// 持久化模式：HotBuffer 计数器 + PG 聚合查询合并。
+func (p *LoggerPlugin) Snapshot() StatisticsSnapshot {
+	if p == nil || !p.persistent {
+		return p.stats.Snapshot()
+	}
+	// 从 HotBuffer 获取实时计数器
+	snap := p.stats.Snapshot()
+	if p.hotBuffer != nil {
+		total, success, failure, tokens := p.hotBuffer.Counters()
+		snap.TotalRequests = total
+		snap.SuccessCount = success
+		snap.FailureCount = failure
+		snap.TotalTokens = tokens
+	}
+	// 从 PG 聚合查询合并历史数据
+	if p.pgStore != nil {
+		pgTotal, pgSuccess, pgFailure, pgTokens, err := p.pgStore.QueryTotals("")
+		if err != nil {
+			log.Printf("[LoggerPlugin] query PG totals error: %v", err)
+		} else {
+			snap.TotalRequests += pgTotal
+			snap.SuccessCount += pgSuccess
+			snap.FailureCount += pgFailure
+			snap.TotalTokens += pgTokens
+		}
+	}
+	return snap
 }
 
 // SetStatisticsEnabled toggles whether in-memory statistics are recorded.
@@ -55,6 +146,41 @@ func SetStatisticsEnabled(enabled bool) { statisticsEnabled.Store(enabled) }
 
 // StatisticsEnabled reports the current recording state.
 func StatisticsEnabled() bool { return statisticsEnabled.Load() }
+
+// Start 启动 WriteQueue 后台协程（仅持久化模式有效）。
+func (p *LoggerPlugin) Start() {
+	if p != nil && p.persistent && p.writeQueue != nil {
+		p.writeQueue.Start()
+	}
+}
+
+// Stop 优雅关闭 WriteQueue，flush 剩余数据（仅持久化模式有效）。
+func (p *LoggerPlugin) Stop() {
+	if p != nil && p.persistent && p.writeQueue != nil {
+		p.writeQueue.Stop()
+	}
+}
+
+// GetPGStore 返回 PGStore 引用，供 handler 使用。
+func (p *LoggerPlugin) GetPGStore() *PGStore {
+	if p == nil {
+		return nil
+	}
+	return p.pgStore
+}
+
+// GetHotBuffer 返回 HotBuffer 引用。
+func (p *LoggerPlugin) GetHotBuffer() *HotBuffer {
+	if p == nil {
+		return nil
+	}
+	return p.hotBuffer
+}
+
+// IsPersistent 返回是否为持久化模式。
+func (p *LoggerPlugin) IsPersistent() bool {
+	return p != nil && p.persistent
+}
 
 // RequestStatistics maintains aggregated request metrics in memory.
 type RequestStatistics struct {

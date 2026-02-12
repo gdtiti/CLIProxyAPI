@@ -103,6 +103,20 @@ func (m *Manager) Register(plugin Plugin) {
 	m.pluginsMu.Unlock()
 }
 
+// ClearPlugins removes all registered plugins.
+// Useful when replacing the default plugin with a persistent one.
+func (m *Manager) ClearPlugins() {
+	if m == nil {
+		return
+	}
+	m.pluginsMu.Lock()
+	m.plugins = nil
+	m.pluginsMu.Unlock()
+}
+
+// ClearDefaultPlugins clears plugins on the default manager.
+func ClearDefaultPlugins() { DefaultManager().ClearPlugins() }
+
 // Publish enqueues a usage record for processing. If no plugin is registered
 // the record will be discarded downstream.
 func (m *Manager) Publish(ctx context.Context, record Record) {
