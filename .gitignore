@@ -42,6 +42,7 @@ docs/*
 !docs/COMPLETE_SUMMARY.md
 !docs/DEV_SCRIPTS.md
 !docs/README.md
+!docs/auth-files-excluded-models-batch-api.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md
