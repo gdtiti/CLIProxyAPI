@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -575,6 +576,16 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	svc := codexauth.NewCodexAuth(e.cfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
+		if errors.Is(err, codexauth.ErrRefreshTokenReused) {
+			auth.Disabled = true
+			auth.Status = cliproxyauth.StatusDisabled
+			auth.StatusMessage = "disabled: refresh token reused, sign in again"
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["refresh_disabled_reason"] = "refresh_token_reused"
+			return auth, nil
+		}
 		return nil, err
 	}
 	if auth.Metadata == nil {

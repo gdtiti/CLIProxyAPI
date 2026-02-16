@@ -36,3 +36,17 @@
 - **PKCE 安全：** 所有 OAuth 流程使用 PKCE 防止授权码拦截
 - **后台刷新：** Token 过期前 10 分钟自动刷新，避免请求中断
 - **多账户支持：** 支持同一提供商多个凭据，通过优先级和前缀区分
+
+## 6. Codex 刷新失败分级（不可恢复场景）
+
+- Codex 在刷新响应处理中将 `HTTP 401 + refresh_token_reused` 识别为不可恢复错误，并通过哨兵错误上抛：`internal/auth/codex/openai_auth.go:23`、`internal/auth/codex/openai_auth.go:197-201`
+- `RefreshTokensWithRetry` 对该错误执行快速失败（fail-fast），立即停止重试，避免无效 attempt：`internal/auth/codex/openai_auth.go:256-285`
+- 执行器 `Refresh(ctx, auth)` 命中该错误后不会继续返回失败给上层，而是将凭证标记为 disabled 并返回更新后的 auth + `nil` error，以触发状态持久化：`internal/runtime/executor/codex_executor.go:562-587`
+
+自动禁用字段：
+- `auth.Disabled = true`，`auth.Status = disabled`：`internal/runtime/executor/codex_executor.go:580-581`
+- `auth.StatusMessage = "disabled: refresh token reused, sign in again"`：`internal/runtime/executor/codex_executor.go:582`
+- `auth.Metadata["refresh_disabled_reason"] = "refresh_token_reused"`：`internal/runtime/executor/codex_executor.go:586`
+
+恢复方式：
+- 该错误不可通过重试恢复，需重新登录（重新执行 Codex OAuth）生成新的 refresh token 后恢复使用。
