@@ -14,6 +14,7 @@
 ## 指南
 - [快速开始](guides/quickstart.md) - 开发环境搭建和基本使用
 - [添加新提供商](guides/add-provider.md) - 如何添加新的 AI 提供商支持
+- [验证 Claude Code 缓存键标准化修复](guides/verify-claude-cache-normalization.md) - 验证 cch 清理、覆盖范围与回归方式
 
 ## 参考
 - [编码约定](reference/coding-conventions.md) - 代码风格和命名规范

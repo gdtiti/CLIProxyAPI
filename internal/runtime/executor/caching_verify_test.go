@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -255,4 +256,70 @@ func TestCacheControlOrder(t *testing.T) {
 	}
 
 	t.Log("cache order correct: tools -> system")
+}
+
+func TestNormalizeClaudeCodeBillingHeader(t *testing.T) {
+	t.Run("Removes Volatile CCH In System Text", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4",
+			"system": [
+				{
+					"type": "text",
+					"text": "x-anthropic-billing-header: cc_version=2.1.37.3a3; cc_entrypoint=claude-vscode; cch=abcdef123456"
+				}
+			],
+			"messages": [{"role": "user", "content": "hello"}]
+		}`)
+
+		output := normalizeClaudeCodeBillingHeader(input)
+		text := gjson.GetBytes(output, "system.0.text").String()
+
+		if text == "" {
+			t.Fatalf("system text missing after normalization")
+		}
+		if gjson.GetBytes(output, "system.0.type").String() != "text" {
+			t.Fatalf("system block type changed unexpectedly")
+		}
+		if strings.Contains(text, "cch=") {
+			t.Fatalf("cch should be removed, got: %q", text)
+		}
+		if text != "x-anthropic-billing-header: cc_version=2.1.37.3a3; cc_entrypoint=claude-vscode" {
+			t.Fatalf("unexpected normalized header: %q", text)
+		}
+	})
+
+	t.Run("Keeps Other System Text Unchanged", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4",
+			"system": [
+				{"type": "text", "text": "You are Claude Code."},
+				{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.37.3a3; cch=xyz"}
+			],
+			"messages": []
+		}`)
+
+		output := normalizeClaudeCodeBillingHeader(input)
+
+		first := gjson.GetBytes(output, "system.0.text").String()
+		second := gjson.GetBytes(output, "system.1.text").String()
+		if first != "You are Claude Code." {
+			t.Fatalf("unrelated system text changed: %q", first)
+		}
+		if second != "x-anthropic-billing-header: cc_version=2.1.37.3a3" {
+			t.Fatalf("billing header normalization mismatch: %q", second)
+		}
+	})
+
+	t.Run("No CCH Means No Change", func(t *testing.T) {
+		input := []byte(`{
+			"model": "claude-sonnet-4",
+			"system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1.37.3a3; cc_entrypoint=claude-vscode"}],
+			"messages": []
+		}`)
+
+		output := normalizeClaudeCodeBillingHeader(input)
+		if string(output) != string(input) {
+			t.Fatalf("payload should remain unchanged when no cch is present")
+		}
+	})
 }

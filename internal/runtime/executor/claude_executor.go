@@ -124,6 +124,10 @@ func (e *ClaudeExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, r
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
 
+	// Normalize volatile Claude Code billing header fields in system prompts.
+	// Newer Claude Code clients append a per-request cch=... token that degrades prompt-cache hit rate.
+	body = normalizeClaudeCodeBillingHeader(body)
+
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
 		body = ensureCacheControl(body)
@@ -264,6 +268,10 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 
 	// Disable thinking if tool_choice forces tool use (Anthropic API constraint)
 	body = disableThinkingIfToolChoiceForced(body)
+
+	// Normalize volatile Claude Code billing header fields in system prompts.
+	// Newer Claude Code clients append a per-request cch=... token that degrades prompt-cache hit rate.
+	body = normalizeClaudeCodeBillingHeader(body)
 
 	// Auto-inject cache_control if missing (optimization for ClawdBot/clients without caching support)
 	if countCacheControls(body) == 0 {
@@ -1037,6 +1045,84 @@ func ensureCacheControl(payload []byte) []byte {
 	payload = injectMessagesCacheControl(payload)
 
 	return payload
+}
+
+// normalizeClaudeCodeBillingHeader removes volatile cch=... fragments from
+// x-anthropic-billing-header inside system text blocks to stabilize prompt cache keys.
+func normalizeClaudeCodeBillingHeader(payload []byte) []byte {
+	system := gjson.GetBytes(payload, "system")
+	if !system.Exists() || !system.IsArray() {
+		return payload
+	}
+
+	system.ForEach(func(index, part gjson.Result) bool {
+		if part.Get("type").String() != "text" {
+			return true
+		}
+		text := part.Get("text").String()
+		normalized := stripVolatileCCHFromBillingHeader(text)
+		if normalized == text {
+			return true
+		}
+
+		path := fmt.Sprintf("system.%d.text", int(index.Int()))
+		updated, err := sjson.SetBytes(payload, path, normalized)
+		if err != nil {
+			log.Warnf("failed to normalize claude billing header at %s: %v", path, err)
+			return true
+		}
+		payload = updated
+		return true
+	})
+
+	return payload
+}
+
+func stripVolatileCCHFromBillingHeader(text string) string {
+	if !strings.Contains(text, "x-anthropic-billing-header:") || !strings.Contains(text, "cch=") {
+		return text
+	}
+
+	lines := strings.Split(text, "\n")
+	changed := false
+	for i := range lines {
+		line := lines[i]
+		if !strings.Contains(line, "x-anthropic-billing-header:") || !strings.Contains(line, "cch=") {
+			continue
+		}
+
+		headerName, headerValue, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+
+		parts := strings.Split(headerValue, ";")
+		kept := make([]string, 0, len(parts))
+		for _, part := range parts {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(trimmed), "cch=") {
+				changed = true
+				continue
+			}
+			kept = append(kept, trimmed)
+		}
+
+		if changed {
+			if len(kept) == 0 {
+				lines[i] = strings.TrimSpace(headerName + ":")
+			} else {
+				lines[i] = strings.TrimSpace(headerName) + ": " + strings.Join(kept, "; ")
+			}
+		}
+	}
+
+	if !changed {
+		return text
+	}
+	return strings.Join(lines, "\n")
 }
 
 func countCacheControls(payload []byte) int {

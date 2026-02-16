@@ -16,9 +16,9 @@ RUN if [ "$MANAGEMENT_ASSET_VERSION" = "latest" ]; then \
   echo "Downloading management asset version: ${MANAGEMENT_ASSET_VERSION}" && \
   curl -L -o management.html \
     "https://github.com/router-for-me/Cli-Proxy-API-Management-Center/releases/download/${MANAGEMENT_ASSET_VERSION}/management.html" || \
-  echo "Management asset download failed, will use runtime fallback"
+  (echo "Management asset download failed, will use runtime fallback" && touch management.html)
 
-FROM golang:1.24-alpine AS builder
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /app
 
@@ -46,6 +46,7 @@ RUN apk add --no-cache tzdata
 RUN mkdir /CLIProxyAPI
 
 COPY --from=builder ./app/CLIProxyAPIPlus /CLIProxyAPI/CLIProxyAPIPlus
+COPY --from=management_asset_downloader /tmp/management.html /tmp/management.html
 
 COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 
@@ -53,7 +54,7 @@ COPY config.example.yaml /CLIProxyAPI/config.example.yaml
 ARG PREPACKAGE_MANAGEMENT_ASSET
 RUN if [ "$PREPACKAGE_MANAGEMENT_ASSET" = "true" ]; then \
   mkdir -p /CLIProxyAPI/static && \
-  if [ -f /tmp/management.html ]; then \
+  if [ -s /tmp/management.html ]; then \
     cp /tmp/management.html /CLIProxyAPI/static/management.html && \
     echo "Management asset pre-packaged successfully"; \
   else \
