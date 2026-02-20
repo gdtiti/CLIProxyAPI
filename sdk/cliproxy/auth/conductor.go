@@ -1265,6 +1265,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = next
 					suspendReason = "not_found"
 					shouldSuspendModel = true
+				case 406:
+					// 406 不触发 auth 冷却，仅记录状态
+					state.StatusMessage = "not_acceptable"
+					state.NextRetryAfter = time.Time{}
+					// 不设置 shouldSuspendModel，不触发冷却
 				case 429:
 					var next time.Time
 					backoffLevel := state.Quota.BackoffLevel
@@ -1520,6 +1525,18 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	if auth == nil {
 		return
 	}
+
+	statusCode := statusCodeFromResult(resultErr)
+
+	// 406 错误不触发 auth 冷却，因为通常是请求格式问题
+	if statusCode == http.StatusNotAcceptable {
+		auth.StatusMessage = "not_acceptable"
+		auth.LastError = cloneError(resultErr)
+		auth.UpdatedAt = now
+		// 不设置 Unavailable，不设置 NextRetryAfter
+		return
+	}
+
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
@@ -1529,7 +1546,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 			auth.StatusMessage = resultErr.Message
 		}
 	}
-	statusCode := statusCodeFromResult(resultErr)
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
