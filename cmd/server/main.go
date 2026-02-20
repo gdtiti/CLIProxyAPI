@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/url"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
@@ -103,6 +105,8 @@ func main() {
 	var vertexImport string
 	var configPath string
 	var password string
+	var tuiMode bool
+	var standalone bool
 	var noIncognito bool
 	var useIncognito bool
 
@@ -130,6 +134,8 @@ func main() {
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&password, "password", "", "")
+	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
+	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 
 	flag.CommandLine.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -554,61 +560,135 @@ func main() {
 			cmd.WaitForCloudDeploy()
 			return
 		}
-		// Start the main proxy service
-		managementasset.StartAutoUpdater(context.Background(), configFilePath)
+		if tuiMode {
+			if standalone {
+				// Standalone mode: start an embedded local server and connect TUI client to it.
+				managementasset.StartAutoUpdater(context.Background(), configFilePath)
+				hook := tui.NewLogHook(2000)
+				hook.SetFormatter(&logging.LogFormatter{})
+				log.AddHook(hook)
 
-		// 初始化并启动 Kiro token 后台刷新
-		if cfg.AuthDir != "" {
-			kiro.InitializeAndStart(cfg.AuthDir, cfg)
-			defer kiro.StopGlobalRefreshManager()
-		}
+				origStdout := os.Stdout
+				origStderr := os.Stderr
+				origLogOutput := log.StandardLogger().Out
+				log.SetOutput(io.Discard)
 
-		// PG Usage 持久化初始化
-		var usagePlugin *usage.LoggerPlugin
-		if usePostgresStore && pgStoreDSN != "" {
-			usageDB, errDB := sql.Open("postgres", pgStoreDSN)
-			if errDB != nil {
-				log.Errorf("failed to open PG for usage: %v", errDB)
-			} else {
-				if errSchema := usage.EnsureUsageSchema(usageDB, pgStoreSchema); errSchema != nil {
-					log.Errorf("failed to ensure usage schema: %v", errSchema)
-					usageDB.Close()
+				devNull, errOpenDevNull := os.Open(os.DevNull)
+				if errOpenDevNull == nil {
+					os.Stdout = devNull
+					os.Stderr = devNull
+				}
+
+				restoreIO := func() {
+					os.Stdout = origStdout
+					os.Stderr = origStderr
+					log.SetOutput(origLogOutput)
+					if devNull != nil {
+						_ = devNull.Close()
+					}
+				}
+
+				localMgmtPassword := fmt.Sprintf("tui-%d-%d", os.Getpid(), time.Now().UnixNano())
+				if password == "" {
+					password = localMgmtPassword
+				}
+
+				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+
+				client := tui.NewClient(cfg.Port, password)
+				ready := false
+				backoff := 100 * time.Millisecond
+				for i := 0; i < 30; i++ {
+					if _, errGetConfig := client.GetConfig(); errGetConfig == nil {
+						ready = true
+						break
+					}
+					time.Sleep(backoff)
+					if backoff < time.Second {
+						backoff = time.Duration(float64(backoff) * 1.5)
+					}
+				}
+
+				if !ready {
+					restoreIO()
+					cancel()
+					<-done
+					fmt.Fprintf(os.Stderr, "TUI error: embedded server is not ready\n")
+					return
+				}
+
+				if errRun := tui.Run(cfg.Port, password, hook, origStdout); errRun != nil {
+					restoreIO()
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
 				} else {
-					instanceID := resolveUsageInstanceID(cfg.Port)
-					usagePlugin = usage.NewPersistentLoggerPlugin(usageDB, instanceID)
-					// 替换 init() 中注册的默认 LoggerPlugin
-					coreusage.ClearDefaultPlugins()
-					coreusage.RegisterPlugin(usagePlugin)
-					usagePlugin.Start()
-					defer usagePlugin.Stop()
-					defer usageDB.Close()
-					log.Infof("PG usage persistence enabled, instance: %s", instanceID)
+					restoreIO()
+				}
 
-					// 启动 CleanupWorker
-					retainDays := 30
-					if v := os.Getenv("USAGE_RETAIN_DAYS"); v != "" {
-						if n, err := strconv.Atoi(v); err == nil && n > 0 {
-							retainDays = n
-						}
-					}
-					aggRetainDays := 365
-					if v := os.Getenv("USAGE_AGG_RETAIN_DAYS"); v != "" {
-						if n, err := strconv.Atoi(v); err == nil && n > 0 {
-							aggRetainDays = n
-						}
-					}
-					cleanup := usage.NewCleanupWorker(usageDB, retainDays, aggRetainDays)
-					cleanup.Start()
-					defer cleanup.Stop()
+				cancel()
+				<-done
+			} else {
+				// Default TUI mode: pure management client.
+				// The proxy server must already be running.
+				if errRun := tui.Run(cfg.Port, password, nil, os.Stdout); errRun != nil {
+					fmt.Fprintf(os.Stderr, "TUI error: %v\n", errRun)
 				}
 			}
-		}
+		} else {
+			// Start the main proxy service
+			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 
-		// 启动服务，传入 usagePlugin（如果有）
-		var serverOpts []api.ServerOption
-		if usagePlugin != nil {
-			serverOpts = append(serverOpts, api.WithUsagePlugin(usagePlugin))
+			if cfg.AuthDir != "" {
+				kiro.InitializeAndStart(cfg.AuthDir, cfg)
+				defer kiro.StopGlobalRefreshManager()
+			}
+
+			// PG Usage 持久化初始化
+			var usagePlugin *usage.LoggerPlugin
+			if usePostgresStore && pgStoreDSN != "" {
+				usageDB, errDB := sql.Open("postgres", pgStoreDSN)
+				if errDB != nil {
+					log.Errorf("failed to open PG for usage: %v", errDB)
+				} else {
+					if errSchema := usage.EnsureUsageSchema(usageDB, pgStoreSchema); errSchema != nil {
+						log.Errorf("failed to ensure usage schema: %v", errSchema)
+						usageDB.Close()
+					} else {
+						instanceID := resolveUsageInstanceID(cfg.Port)
+						usagePlugin = usage.NewPersistentLoggerPlugin(usageDB, instanceID)
+						// 替换 init() 中注册的默认 LoggerPlugin
+						coreusage.ClearDefaultPlugins()
+						coreusage.RegisterPlugin(usagePlugin)
+						usagePlugin.Start()
+						defer usagePlugin.Stop()
+						defer usageDB.Close()
+						log.Infof("PG usage persistence enabled, instance: %s", instanceID)
+
+						// 启动 CleanupWorker
+						retainDays := 30
+						if v := os.Getenv("USAGE_RETAIN_DAYS"); v != "" {
+							if n, err := strconv.Atoi(v); err == nil && n > 0 {
+								retainDays = n
+							}
+						}
+						aggRetainDays := 365
+						if v := os.Getenv("USAGE_AGG_RETAIN_DAYS"); v != "" {
+							if n, err := strconv.Atoi(v); err == nil && n > 0 {
+								aggRetainDays = n
+							}
+						}
+						cleanup := usage.NewCleanupWorker(usageDB, retainDays, aggRetainDays)
+						cleanup.Start()
+						defer cleanup.Stop()
+					}
+				}
+			}
+
+			// 启动服务，传入 usagePlugin（如果有）
+			var serverOpts []api.ServerOption
+			if usagePlugin != nil {
+				serverOpts = append(serverOpts, api.WithUsagePlugin(usagePlugin))
+			}
+			cmd.StartService(cfg, configFilePath, password, serverOpts...)
 		}
-		cmd.StartService(cfg, configFilePath, password, serverOpts...)
 	}
 }
