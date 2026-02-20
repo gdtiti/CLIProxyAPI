@@ -295,8 +295,11 @@ func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream b
 					if v := fn.Get("description"); v.Exists() {
 						item, _ = sjson.Set(item, "description", v.Value())
 					}
-					if v := fn.Get("parameters"); v.Exists() {
+					if v := fn.Get("parameters"); v.Exists() && v.Type != gjson.Null {
 						item, _ = sjson.SetRaw(item, "parameters", v.Raw)
+					} else {
+						// 如果 parameters 为 null 或不存在，设置默认的空对象 schema
+						item, _ = sjson.SetRaw(item, "parameters", `{"type":"object","properties":{},"required":[]}`)
 					}
 					if v := fn.Get("strict"); v.Exists() {
 						item, _ = sjson.Set(item, "strict", v.Value())
