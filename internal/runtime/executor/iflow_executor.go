@@ -470,11 +470,12 @@ func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 		r.Header.Set("x-iflow-signature", signature)
 	}
 
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-	} else {
-		r.Header.Set("Accept", "application/json")
-	}
+	// 添加 conversation-id，始终带键（与 iFlow 官方行为一致）
+	conversationID := generateUUID()
+	r.Header.Set("conversation-id", conversationID)
+
+	// 不再主动设置 Accept 头，使用 HTTP 客户端默认行为
+	// 这避免了某些上游节点因显式 Accept: text/event-stream 而返回 406
 }
 
 // createIFlowSignature generates HMAC-SHA256 signature for iFlow API requests.
