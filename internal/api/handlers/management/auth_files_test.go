@@ -43,7 +43,7 @@ func (e *managementQuotaExecutor) Execute(context.Context, *coreauth.Auth, clipr
 	return cliproxyexecutor.Response{}, e.err
 }
 
-func (e *managementQuotaExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *managementQuotaExecutor) ExecuteStream(context.Context, *coreauth.Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	return nil, e.err
 }
 

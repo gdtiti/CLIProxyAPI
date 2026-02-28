@@ -565,7 +565,7 @@ func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *test
 	}
 }
 
-func TestRoundRobinSelectorPick_PrefersHigherSuccessScoreButStillUsesAllAccounts(t *testing.T) {
+func TestRoundRobinSelectorPick_EvenRoundRobinIgnoresSuccessScoreByDefault(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
@@ -588,15 +588,12 @@ func TestRoundRobinSelectorPick_PrefersHigherSuccessScoreButStillUsesAllAccounts
 		counts[picked.ID]++
 	}
 
-	if counts["b"] <= counts["a"] {
-		t.Fatalf("expected high-success auth to be preferred, counts=%v", counts)
-	}
-	if counts["a"] == 0 {
-		t.Fatalf("expected load balancing to still use lower-score auth, counts=%v", counts)
+	if counts["a"] != counts["b"] {
+		t.Fatalf("expected even round-robin distribution, counts=%v", counts)
 	}
 }
 
-func TestRoundRobinSelectorPick_ExploreCycleTouchesEveryAccount(t *testing.T) {
+func TestRoundRobinSelectorPick_EvenRoundRobinTouchesEveryAccount(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
@@ -620,10 +617,10 @@ func TestRoundRobinSelectorPick_ExploreCycleTouchesEveryAccount(t *testing.T) {
 		counts[picked.ID]++
 	}
 
-	if counts["a"] <= counts["b"] || counts["a"] <= counts["c"] {
-		t.Fatalf("expected high-success auth to receive more traffic, counts=%v", counts)
+	if counts["a"] == 0 || counts["b"] == 0 || counts["c"] == 0 {
+		t.Fatalf("expected every account to be selected, counts=%v", counts)
 	}
-	if counts["b"] == 0 || counts["c"] == 0 {
-		t.Fatalf("expected exploration to touch every account, counts=%v", counts)
+	if counts["a"] != counts["b"] || counts["b"] != counts["c"] {
+		t.Fatalf("expected even round-robin distribution, counts=%v", counts)
 	}
 }
