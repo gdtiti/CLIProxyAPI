@@ -318,3 +318,41 @@ func TestTruncationRemovedForCodexCompatibility(t *testing.T) {
 		t.Fatalf("truncation should be removed for Codex compatibility")
 	}
 }
+
+func TestStripItemReferencesFromInput(t *testing.T) {
+	inputJSON := []byte(`{
+		"model": "gpt-5.2",
+		"input": [
+			{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]},
+			{"type": "item_reference", "id": "rs_0f3abc3afb6cdb600169a2d44821fc81a0a1798a952764f3db"},
+			{"type": "message", "role": "user", "content": [
+				{"type": "item_ref", "id": "rs_other"},
+				{"type": "input_text", "text": "Follow up"}
+			]}
+		]
+	}`)
+
+	output := ConvertOpenAIResponsesRequestToCodex("gpt-5.2", inputJSON, false)
+	outputStr := string(output)
+
+	input := gjson.Get(outputStr, "input")
+	if !input.IsArray() {
+		t.Fatalf("input should be an array")
+	}
+	arr := input.Array()
+	if len(arr) != 2 {
+		t.Errorf("expected 2 input items after stripping refs, got %d", len(arr))
+	}
+	// First item: user message unchanged
+	if arr[0].Get("content.0.type").String() != "input_text" {
+		t.Errorf("first message content should be input_text, got %s", arr[0].Get("content.0.type").String())
+	}
+	// Second item: message with item_ref stripped from content
+	content := arr[1].Get("content")
+	if !content.IsArray() || len(content.Array()) != 1 {
+		t.Errorf("second message should have 1 content item after stripping item_ref, got %d", len(content.Array()))
+	}
+	if content.Array()[0].Get("type").String() != "input_text" {
+		t.Errorf("remaining content should be input_text, got %s", content.Array()[0].Get("type").String())
+	}
+}

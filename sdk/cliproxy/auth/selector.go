@@ -40,9 +40,9 @@ const (
 	globalModelStateKey = "_global"
 
 	selectorSuccessScoreDefault = 0.5
-	selectorSuccessScoreAlpha   = 0.25
-	selectorPreferredScoreGap   = 0.15
-	selectorExploreEvery        = 5
+	selectorSuccessScoreAlpha   = 0.20
+	selectorPreferredScoreGap   = 0.35
+	selectorExploreEvery        = 1
 )
 
 type modelCooldownError struct {
@@ -357,17 +357,17 @@ func (s *RoundRobinSelector) pickByHealthLocked(available []*Auth, index int) *A
 		return available[0]
 	}
 
+	// Default to fully even round-robin across all currently available accounts.
+	// Health scores are only used as a tie-breaker when we explicitly explore
+	// preferred accounts (disabled by default via selectorExploreEvery=1).
 	candidateIndexes := make([]int, 0, len(available))
 	for i := 0; i < len(available); i++ {
 		candidateIndexes = append(candidateIndexes, i)
 	}
-	if selectorExploreEvery > 0 && index%selectorExploreEvery != 0 {
-		candidateIndexes = s.preferredIndexesLocked(available)
-		if len(candidateIndexes) == 0 {
-			candidateIndexes = make([]int, 0, len(available))
-			for i := 0; i < len(available); i++ {
-				candidateIndexes = append(candidateIndexes, i)
-			}
+	if selectorExploreEvery > 1 && index%selectorExploreEvery != 0 {
+		preferred := s.preferredIndexesLocked(available)
+		if len(preferred) > 0 {
+			candidateIndexes = preferred
 		}
 	}
 	picked := candidateIndexes[index%len(candidateIndexes)]

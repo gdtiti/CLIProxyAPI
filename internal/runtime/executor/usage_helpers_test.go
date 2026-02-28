@@ -220,4 +220,49 @@ func TestParseCodexQuotaRetryDecision_WindowClassification(t *testing.T) {
 			t.Fatalf("Window = %q, want %q", decision.Window, "weekly")
 		}
 	})
+
+	t.Run("both 5h and weekly reached, identify as weekly", func(t *testing.T) {
+		body := []byte(`{
+			"rate_limit": {
+				"allowed": false,
+				"limit_reached": true,
+				"primary_window": {"limit_window_seconds": 18000, "used_percent": 100, "reset_after_seconds": 900},
+				"secondary_window": {"limit_window_seconds": 604800, "used_percent": 100, "reset_after_seconds": 400000}
+			}
+		}`)
+		decision := parseCodexQuotaRetryDecision(body, now)
+		if decision.RetryAfter == nil {
+			t.Fatalf("RetryAfter = nil")
+		}
+		if decision.Window != "weekly" {
+			t.Fatalf("Window = %q, want weekly (both reached, pick longer duration)", decision.Window)
+		}
+		if *decision.RetryAfter != 400000*time.Second {
+			t.Fatalf("RetryAfter = %v, want 400000s (weekly reset)", *decision.RetryAfter)
+		}
+	})
+
+	t.Run("actual Codex usage API response format (weekly only at 100%)", func(t *testing.T) {
+		// Real response from chatgpt.com/backend-api/wham/usage for a rate-limited account
+		body := []byte(`{
+			"rate_limit": {
+				"allowed": false,
+				"limit_reached": true,
+				"primary_window": {"used_percent": 0, "limit_window_seconds": 18000, "reset_after_seconds": 18000, "reset_at": 1772263559},
+				"secondary_window": {"used_percent": 100, "limit_window_seconds": 604800, "reset_after_seconds": 475440, "reset_at": 1772720999}
+			}
+		}`)
+		now := time.Unix(1772245000, 0) // ~5.5 days before reset_at
+		decision := parseCodexQuotaRetryDecision(body, now)
+		if decision.RetryAfter == nil {
+			t.Fatalf("RetryAfter = nil")
+		}
+		if decision.Window != "weekly" {
+			t.Fatalf("Window = %q, want weekly (secondary at 100%%, primary at 0%%)", decision.Window)
+		}
+		// reset_after_seconds=475440 should be used
+		if *decision.RetryAfter != 475440*time.Second {
+			t.Fatalf("RetryAfter = %v, want 475440s", *decision.RetryAfter)
+		}
+	})
 }

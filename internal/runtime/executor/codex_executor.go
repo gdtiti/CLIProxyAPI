@@ -157,7 +157,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, b, time.Now())
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, httpResp.StatusCode, b, time.Now())
 		err = statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: retryAfter, cooldownWindow: quotaWindow}
 		return resp, err
 	}
@@ -262,7 +262,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, b, time.Now())
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, httpResp.StatusCode, b, time.Now())
 		err = statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: retryAfter, cooldownWindow: quotaWindow}
 		return resp, err
 	}
@@ -361,7 +361,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		appendAPIResponseChunk(ctx, e.cfg, data)
 		logWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, data, time.Now())
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, httpResp.StatusCode, data, time.Now())
 		err = statusErr{code: httpResp.StatusCode, msg: string(data), retryAfter: retryAfter, cooldownWindow: quotaWindow}
 		return nil, err
 	}
@@ -722,8 +722,24 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 	return
 }
 
-func (e *CodexExecutor) resolveCodexUsageLimitRetryAfter(ctx context.Context, auth *cliproxyauth.Auth, apiKey, baseURL string, errorBody []byte, now time.Time) (*time.Duration, string) {
+func authIDOrEmpty(a *cliproxyauth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	return a.ID
+}
+
+func (e *CodexExecutor) resolveCodexUsageLimitRetryAfter(ctx context.Context, auth *cliproxyauth.Auth, apiKey, baseURL string, statusCode int, errorBody []byte, now time.Time) (*time.Duration, string) {
 	retryAfter := parseCodexUsageLimitRetryAfter(errorBody, now)
+	// 429 一律拉取 usage API 获取配额，区分 five_hour/weekly，设置精确恢复时间
+	if statusCode == http.StatusTooManyRequests {
+		quotaDecision := e.fetchCodexQuotaRetryDecision(ctx, auth, apiKey, baseURL, now)
+		if quotaDecision.RetryAfter != nil {
+			logWithRequestID(ctx).Infof("codex 429: fetched quota window=%s retry_after=%v auth=%s",
+				quotaDecision.Window, *quotaDecision.RetryAfter, authIDOrEmpty(auth))
+			return quotaDecision.RetryAfter, quotaDecision.Window
+		}
+	}
 	if !isCodexUsageLimitReached(errorBody) {
 		return retryAfter, ""
 	}

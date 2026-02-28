@@ -15,6 +15,7 @@ services:
     environment:
       DEPLOY: ${DEPLOY:-}
     ports:
+      - "8383:8383"
       - "8317:8317"
       - "8085:8085"
       - "1455:1455"
@@ -26,3 +27,8 @@ services:
       - ${CLI_PROXY_AUTH_PATH:-./auths}:/root/.cli-proxy-api
       - ${CLI_PROXY_LOG_PATH:-./logs}:/CLIProxyAPI/logs
     restart: unless-stopped
+
+networks:
+  default:
+    name: new-api_default
+    external: true

@@ -1264,15 +1264,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				statusCode := statusCodeFromResult(result.Error)
 				switch statusCode {
 				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
+					auth.Disabled = true
+					auth.Status = StatusDisabled
+					state.Status = StatusDisabled
 					suspendReason = "unauthorized"
 					shouldSuspendModel = true
-				case 402, 403:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
+				case 402:
+					auth.Disabled = true
+					auth.Status = StatusDisabled
+					state.Status = StatusDisabled
 					suspendReason = "payment_required"
 					shouldSuspendModel = true
+				case 403:
+					state.NextRetryAfter = time.Time{}
 				case 404:
 					next := now.Add(12 * time.Hour)
 					state.NextRetryAfter = next
@@ -1328,7 +1332,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = time.Time{}
 				}
 
-				auth.Status = StatusError
+				if auth.Status != StatusDisabled {
+					auth.Status = StatusError
+				}
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
@@ -1590,10 +1596,14 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
-		auth.NextRetryAfter = now.Add(30 * time.Minute)
-	case 402, 403:
+		auth.Disabled = true
+		auth.Status = StatusDisabled
+	case 402:
 		auth.StatusMessage = "payment_required"
-		auth.NextRetryAfter = now.Add(30 * time.Minute)
+		auth.Disabled = true
+		auth.Status = StatusDisabled
+	case 403:
+		auth.NextRetryAfter = time.Time{}
 	case 404:
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)

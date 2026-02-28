@@ -417,8 +417,14 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
-	if !auth.NextRetryAfter.IsZero() {
-		entry["next_retry_after"] = auth.NextRetryAfter
+	nextRetry := auth.NextRetryAfter
+	if nextRetry.IsZero() {
+		if earliest, ok := earliestModelRetryAfter(auth); ok {
+			nextRetry = earliest
+		}
+	}
+	if !nextRetry.IsZero() {
+		entry["next_retry_after"] = nextRetry
 	}
 	if path != "" {
 		entry["path"] = path
@@ -562,6 +568,26 @@ func resolveAuthModelState(auth *coreauth.Auth, model string) *coreauth.ModelSta
 		return nil
 	}
 	return state
+}
+
+
+func earliestModelRetryAfter(auth *coreauth.Auth) (time.Time, bool) {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return time.Time{}, false
+	}
+	earliest := time.Time{}
+	for _, state := range auth.ModelStates {
+		if state == nil || state.NextRetryAfter.IsZero() {
+			continue
+		}
+		if earliest.IsZero() || state.NextRetryAfter.Before(earliest) {
+			earliest = state.NextRetryAfter
+		}
+	}
+	if earliest.IsZero() {
+		return time.Time{}, false
+	}
+	return earliest, true
 }
 
 func quotaWindowFromReason(reason string) string {
