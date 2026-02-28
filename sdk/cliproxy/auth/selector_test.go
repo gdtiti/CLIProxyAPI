@@ -351,6 +351,43 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 	}
 }
 
+func TestFillFirstSelectorPick_GlobalModelStateBlocksAllModels(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	now := time.Now()
+
+	high := &Auth{
+		ID:         "high",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			globalModelStateKey: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota: QuotaState{
+					Exceeded: true,
+				},
+			},
+		},
+	}
+	low := &Auth{
+		ID:         "low",
+		Attributes: map[string]string{"priority": "0"},
+	}
+
+	got, err := selector.Pick(context.Background(), "mixed", "any-model", cliproxyexecutor.Options{}, []*Auth{high, low})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "low" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "low")
+	}
+}
+
 func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 	t.Parallel()
 
@@ -525,5 +562,68 @@ func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *test
 		if got.ID != expectedID {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, expectedID)
 		}
+	}
+}
+
+func TestRoundRobinSelectorPick_PrefersHigherSuccessScoreButStillUsesAllAccounts(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+
+	for i := 0; i < 16; i++ {
+		selector.ObserveResult(Result{AuthID: "a", Success: false, Error: &Error{HTTPStatus: 500, Message: "boom"}})
+		selector.ObserveResult(Result{AuthID: "b", Success: true})
+	}
+
+	counts := map[string]int{"a": 0, "b": 0}
+	for i := 0; i < 40; i++ {
+		picked, err := selector.Pick(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if picked == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		counts[picked.ID]++
+	}
+
+	if counts["b"] <= counts["a"] {
+		t.Fatalf("expected high-success auth to be preferred, counts=%v", counts)
+	}
+	if counts["a"] == 0 {
+		t.Fatalf("expected load balancing to still use lower-score auth, counts=%v", counts)
+	}
+}
+
+func TestRoundRobinSelectorPick_ExploreCycleTouchesEveryAccount(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+
+	for i := 0; i < 24; i++ {
+		selector.ObserveResult(Result{AuthID: "a", Success: true})
+		selector.ObserveResult(Result{AuthID: "b", Success: false, Error: &Error{HTTPStatus: 500, Message: "boom"}})
+		selector.ObserveResult(Result{AuthID: "c", Success: false, Error: &Error{HTTPStatus: 500, Message: "boom"}})
+	}
+
+	counts := map[string]int{"a": 0, "b": 0, "c": 0}
+	for i := 0; i < 60; i++ {
+		picked, err := selector.Pick(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if picked == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		counts[picked.ID]++
+	}
+
+	if counts["a"] <= counts["b"] || counts["a"] <= counts["c"] {
+		t.Fatalf("expected high-success auth to receive more traffic, counts=%v", counts)
+	}
+	if counts["b"] == 0 || counts["c"] == 0 {
+		t.Fatalf("expected exploration to touch every account, counts=%v", counts)
 	}
 }

@@ -19,9 +19,10 @@ import (
 
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
-	mu      sync.Mutex
-	cursors map[string]int
-	maxKeys int
+	mu           sync.Mutex
+	cursors      map[string]int
+	maxKeys      int
+	successScore map[string]float64
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -36,6 +37,12 @@ const (
 	blockReasonCooldown
 	blockReasonDisabled
 	blockReasonOther
+	globalModelStateKey = "_global"
+
+	selectorSuccessScoreDefault = 0.5
+	selectorSuccessScoreAlpha   = 0.25
+	selectorPreferredScoreGap   = 0.15
+	selectorExploreEvery        = 5
 )
 
 type modelCooldownError struct {
@@ -309,8 +316,109 @@ func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, o
 		index = 0
 	}
 	s.cursors[key] = index + 1
+	selected := s.pickByHealthLocked(available, index)
 	s.mu.Unlock()
-	return available[index%len(available)], nil
+	return selected, nil
+}
+
+// ObserveResult updates in-memory selector health scores using EWMA success tracking.
+func (s *RoundRobinSelector) ObserveResult(result Result) {
+	authID := strings.TrimSpace(result.AuthID)
+	if authID == "" {
+		return
+	}
+	outcome := 0.0
+	if result.Success {
+		outcome = 1.0
+	}
+	s.mu.Lock()
+	if s.successScore == nil {
+		s.successScore = make(map[string]float64)
+	}
+	prev, ok := s.successScore[authID]
+	if !ok {
+		prev = selectorSuccessScoreDefault
+	}
+	next := ((1 - selectorSuccessScoreAlpha) * prev) + (selectorSuccessScoreAlpha * outcome)
+	if next < 0 {
+		next = 0
+	} else if next > 1 {
+		next = 1
+	}
+	s.successScore[authID] = next
+	s.mu.Unlock()
+}
+
+func (s *RoundRobinSelector) pickByHealthLocked(available []*Auth, index int) *Auth {
+	if len(available) == 0 {
+		return nil
+	}
+	if len(available) == 1 {
+		return available[0]
+	}
+
+	candidateIndexes := make([]int, 0, len(available))
+	for i := 0; i < len(available); i++ {
+		candidateIndexes = append(candidateIndexes, i)
+	}
+	if selectorExploreEvery > 0 && index%selectorExploreEvery != 0 {
+		candidateIndexes = s.preferredIndexesLocked(available)
+		if len(candidateIndexes) == 0 {
+			candidateIndexes = make([]int, 0, len(available))
+			for i := 0; i < len(available); i++ {
+				candidateIndexes = append(candidateIndexes, i)
+			}
+		}
+	}
+	picked := candidateIndexes[index%len(candidateIndexes)]
+	return available[picked]
+}
+
+func (s *RoundRobinSelector) preferredIndexesLocked(available []*Auth) []int {
+	if len(available) == 0 {
+		return nil
+	}
+	maxScore := 0.0
+	scores := make([]float64, len(available))
+	for i := 0; i < len(available); i++ {
+		score := s.authSuccessScoreLocked(available[i])
+		scores[i] = score
+		if i == 0 || score > maxScore {
+			maxScore = score
+		}
+	}
+	threshold := maxScore - selectorPreferredScoreGap
+	if threshold < 0 {
+		threshold = 0
+	}
+	indexes := make([]int, 0, len(available))
+	for i := 0; i < len(available); i++ {
+		if scores[i] >= threshold {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func (s *RoundRobinSelector) authSuccessScoreLocked(auth *Auth) float64 {
+	if s == nil || auth == nil {
+		return selectorSuccessScoreDefault
+	}
+	id := strings.TrimSpace(auth.ID)
+	if id == "" || len(s.successScore) == 0 {
+		return selectorSuccessScoreDefault
+	}
+	score, ok := s.successScore[id]
+	if !ok {
+		return selectorSuccessScoreDefault
+	}
+	if score < 0 {
+		return 0
+	}
+	if score > 1 {
+		return 1
+	}
+	return score
 }
 
 // ensureCursorKey ensures the cursor map has capacity for the given key.
@@ -371,13 +479,7 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	}
 	if model != "" {
 		if len(auth.ModelStates) > 0 {
-			state, ok := auth.ModelStates[model]
-			if (!ok || state == nil) && model != "" {
-				baseModel := canonicalModelKey(model)
-				if baseModel != "" && baseModel != model {
-					state, ok = auth.ModelStates[baseModel]
-				}
-			}
+			state, ok := resolveModelStateForSelection(auth.ModelStates, model)
 			if ok && state != nil {
 				if state.Status == StatusDisabled {
 					return true, blockReasonDisabled, time.Time{}
@@ -419,4 +521,23 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 		return true, blockReasonOther, next
 	}
 	return false, blockReasonNone, time.Time{}
+}
+
+func resolveModelStateForSelection(states map[string]*ModelState, model string) (*ModelState, bool) {
+	if len(states) == 0 {
+		return nil, false
+	}
+	if state, ok := states[model]; ok && state != nil {
+		return state, true
+	}
+	baseModel := canonicalModelKey(model)
+	if baseModel != "" && baseModel != model {
+		if state, ok := states[baseModel]; ok && state != nil {
+			return state, true
+		}
+	}
+	if state, ok := states[globalModelStateKey]; ok && state != nil {
+		return state, true
+	}
+	return nil, false
 }

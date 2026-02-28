@@ -385,6 +385,17 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"source":         "memory",
 		"size":           int64(0),
 	}
+	if reason, window, display := resolveAuthQuotaDisplay(auth); reason != "" || window != "" || display != "" {
+		if reason != "" {
+			entry["status_reason"] = reason
+		}
+		if window != "" {
+			entry["quota_window"] = window
+		}
+		if display != "" {
+			entry["status_display"] = display
+		}
+	}
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
@@ -503,6 +514,76 @@ func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(auth.Attributes["runtime_only"]), "true")
+}
+
+func resolveAuthQuotaDisplay(auth *coreauth.Auth) (reason, window, display string) {
+	if auth == nil {
+		return "", "", ""
+	}
+	reason = strings.TrimSpace(auth.Quota.Reason)
+	if reason == "" || strings.EqualFold(reason, "quota") {
+		if global := resolveAuthModelState(auth, "_global"); global != nil {
+			if globalReason := strings.TrimSpace(global.Quota.Reason); globalReason != "" {
+				reason = globalReason
+			}
+		}
+	}
+	if reason == "" || strings.EqualFold(reason, "quota") {
+		for _, state := range auth.ModelStates {
+			if state == nil {
+				continue
+			}
+			if state.Quota.Reason != "" {
+				candidate := strings.TrimSpace(state.Quota.Reason)
+				if candidate == "" {
+					continue
+				}
+				reason = candidate
+				if !strings.EqualFold(candidate, "quota") {
+					break
+				}
+			}
+		}
+	}
+	window = quotaWindowFromReason(reason)
+	display = strings.TrimSpace(auth.StatusMessage)
+	if display == "" && window != "" {
+		display = quotaDisplayFromWindow(window)
+	}
+	return reason, window, display
+}
+
+func resolveAuthModelState(auth *coreauth.Auth, model string) *coreauth.ModelState {
+	if auth == nil || len(auth.ModelStates) == 0 {
+		return nil
+	}
+	state, ok := auth.ModelStates[model]
+	if !ok {
+		return nil
+	}
+	return state
+}
+
+func quotaWindowFromReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "quota_5h":
+		return "five_hour"
+	case "quota_weekly":
+		return "weekly"
+	default:
+		return ""
+	}
+}
+
+func quotaDisplayFromWindow(window string) string {
+	switch strings.ToLower(strings.TrimSpace(window)) {
+	case "five_hour":
+		return "quota exhausted (5h window)"
+	case "weekly":
+		return "quota exhausted (weekly window)"
+	default:
+		return ""
+	}
 }
 
 // Download single auth file by name

@@ -95,6 +95,8 @@ type Result struct {
 	Success bool
 	// RetryAfter carries a provider supplied retry hint (e.g. 429 retryDelay).
 	RetryAfter *time.Duration
+	// QuotaWindow indicates normalized quota window when known (e.g. "five_hour", "weekly").
+	QuotaWindow string
 	// Error describes the failure when Success is false.
 	Error *Error
 }
@@ -635,6 +637,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
+			result.QuotaWindow = quotaWindowFromError(errExec)
 			m.MarkResult(execCtx, result)
 			if isRequestInvalidError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
@@ -691,7 +694,8 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			if ra := retryAfterFromError(errExec); ra != nil {
 				result.RetryAfter = ra
 			}
-			m.hook.OnResult(execCtx, result)
+			result.QuotaWindow = quotaWindowFromError(errExec)
+			m.MarkResult(execCtx, result)
 			if isRequestInvalidError(errExec) {
 				return cliproxyexecutor.Response{}, errExec
 			}
@@ -745,6 +749,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: false, Error: rerr}
 			result.RetryAfter = retryAfterFromError(errStream)
+			result.QuotaWindow = quotaWindowFromError(errStream)
 			m.MarkResult(execCtx, result)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
@@ -764,7 +769,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
 					}
-					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
+					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr, RetryAfter: retryAfterFromError(chunk.Err), QuotaWindow: quotaWindowFromError(chunk.Err)})
 				}
 				if !forward {
 					continue
@@ -1226,6 +1231,11 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
+				if shouldApplyGlobalQuotaState(result.Provider) {
+					if globalState, ok := auth.ModelStates[globalModelStateKey]; ok && globalState != nil {
+						resetModelState(globalState, now)
+					}
+				}
 				updateAggregatedAvailability(auth, now)
 				if !hasModelError(auth, now) {
 					auth.LastError = nil
@@ -1281,12 +1291,29 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						backoffLevel = nextLevel
 					}
 					state.NextRetryAfter = next
+					state.StatusMessage = quotaStatusMessage(result.QuotaWindow)
 					state.Quota = QuotaState{
 						Exceeded:      true,
-						Reason:        "quota",
+						Reason:        quotaReasonFromWindow(result.QuotaWindow),
 						NextRecoverAt: next,
 						BackoffLevel:  backoffLevel,
 					}
+					if shouldApplyGlobalQuotaState(result.Provider) {
+						globalState := ensureModelState(auth, globalModelStateKey)
+						globalState.Unavailable = true
+						globalState.Status = StatusError
+						globalState.UpdatedAt = now
+						globalState.NextRetryAfter = next
+						globalState.LastError = cloneError(result.Error)
+						globalState.StatusMessage = state.StatusMessage
+						globalState.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        quotaReasonFromWindow(result.QuotaWindow),
+							NextRecoverAt: next,
+							BackoffLevel:  backoffLevel,
+						}
+					}
+					auth.StatusMessage = state.StatusMessage
 					suspendReason = "quota"
 					shouldSuspendModel = true
 					setModelQuota = true
@@ -1305,13 +1332,20 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, result.QuotaWindow, now)
 			}
 		}
 
 		_ = m.persist(ctx, auth)
 	}
 	m.mu.Unlock()
+
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	if observer, ok := selector.(interface{ ObserveResult(Result) }); ok {
+		observer.ObserveResult(result)
+	}
 
 	if clearModelQuota && result.Model != "" {
 		registry.GetGlobalRegistry().ClearModelQuotaExceeded(result.AuthID, result.Model)
@@ -1497,6 +1531,26 @@ func retryAfterFromError(err error) *time.Duration {
 	return new(*retryAfter)
 }
 
+func quotaWindowFromError(err error) string {
+	if err == nil {
+		return ""
+	}
+	type quotaWindowProvider interface {
+		CooldownWindow() string
+	}
+	qwp, ok := err.(quotaWindowProvider)
+	if !ok || qwp == nil {
+		return ""
+	}
+	window := strings.ToLower(strings.TrimSpace(qwp.CooldownWindow()))
+	switch window {
+	case "five_hour", "weekly":
+		return window
+	default:
+		return ""
+	}
+}
+
 func statusCodeFromResult(err *Error) int {
 	if err == nil {
 		return 0
@@ -1519,7 +1573,7 @@ func isRequestInvalidError(err error) bool {
 	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, quotaWindow string, now time.Time) {
 	if auth == nil {
 		return
 	}
@@ -1544,9 +1598,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)
 	case 429:
-		auth.StatusMessage = "quota exhausted"
+		auth.StatusMessage = quotaStatusMessage(quotaWindow)
 		auth.Quota.Exceeded = true
-		auth.Quota.Reason = "quota"
+		auth.Quota.Reason = quotaReasonFromWindow(quotaWindow)
 		var next time.Time
 		if retryAfter != nil {
 			next = now.Add(*retryAfter)
@@ -1573,6 +1627,28 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 }
 
+func quotaReasonFromWindow(quotaWindow string) string {
+	switch strings.ToLower(strings.TrimSpace(quotaWindow)) {
+	case "five_hour":
+		return "quota_5h"
+	case "weekly":
+		return "quota_weekly"
+	default:
+		return "quota"
+	}
+}
+
+func quotaStatusMessage(quotaWindow string) string {
+	switch strings.ToLower(strings.TrimSpace(quotaWindow)) {
+	case "five_hour":
+		return "quota exhausted (5h window)"
+	case "weekly":
+		return "quota exhausted (weekly window)"
+	default:
+		return "quota exhausted"
+	}
+}
+
 // nextQuotaCooldown returns the next cooldown duration and updated backoff level for repeated quota errors.
 func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) {
 	if prevLevel < 0 {
@@ -1589,6 +1665,11 @@ func nextQuotaCooldown(prevLevel int, disableCooling bool) (time.Duration, int) 
 		return quotaBackoffMax, prevLevel
 	}
 	return cooldown, prevLevel + 1
+}
+
+func shouldApplyGlobalQuotaState(provider string) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	return provider == "codex"
 }
 
 // List returns all auth entries currently known by the manager.
