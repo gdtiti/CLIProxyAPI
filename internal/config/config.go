@@ -69,6 +69,9 @@ type Config struct {
 
 	// RequestRetry defines the retry times when the request failed.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
+	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
+	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).
+	MaxRetryCredentials int `yaml:"max-retry-credentials" json:"max-retry-credentials"`
 	// MaxRetryInterval defines the maximum wait time in seconds before retrying a cooled-down credential.
 	MaxRetryInterval int `yaml:"max-retry-interval" json:"max-retry-interval"`
 
@@ -86,6 +89,10 @@ type Config struct {
 
 	// KiroKey defines a list of Kiro (AWS CodeWhisperer) configurations.
 	KiroKey []KiroKey `yaml:"kiro" json:"kiro"`
+
+	// KiroFingerprint defines a global fingerprint configuration for all Kiro requests.
+	// When set, all Kiro requests will use this fixed fingerprint instead of random generation.
+	KiroFingerprint *KiroFingerprintConfig `yaml:"kiro-fingerprint,omitempty" json:"kiro-fingerprint,omitempty"`
 
 	// KiroPreferredEndpoint sets the global default preferred endpoint for all Kiro providers.
 	// Values: "ide" (default, CodeWhisperer) or "cli" (Amazon Q).
@@ -338,6 +345,10 @@ type CloakConfig struct {
 	// SensitiveWords is a list of words to obfuscate with zero-width characters.
 	// This can help bypass certain content filters.
 	SensitiveWords []string `yaml:"sensitive-words,omitempty" json:"sensitive-words,omitempty"`
+
+	// CacheUserID controls whether Claude user_id values are cached per API key.
+	// When false, a fresh random user_id is generated for every request.
+	CacheUserID *bool `yaml:"cache-user-id,omitempty" json:"cache-user-id,omitempty"`
 }
 
 // ClaudeKey represents the configuration for a Claude API key,
@@ -501,6 +512,9 @@ type KiroKey struct {
 	// Region is the AWS region (default: us-east-1).
 	Region string `yaml:"region,omitempty" json:"region,omitempty"`
 
+	// StartURL is the IAM Identity Center (IDC) start URL for SSO login.
+	StartURL string `yaml:"start-url,omitempty" json:"start-url,omitempty"`
+
 	// ProxyURL optionally overrides the global proxy for this configuration.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 
@@ -511,6 +525,20 @@ type KiroKey struct {
 	// PreferredEndpoint sets the preferred Kiro API endpoint/quota.
 	// Values: "codewhisperer" (default, IDE quota) or "amazonq" (CLI quota).
 	PreferredEndpoint string `yaml:"preferred-endpoint,omitempty" json:"preferred-endpoint,omitempty"`
+}
+
+// KiroFingerprintConfig defines a global fingerprint configuration for Kiro requests.
+// When configured, all Kiro requests will use this fixed fingerprint instead of random generation.
+// Empty fields will fall back to random selection from built-in pools.
+type KiroFingerprintConfig struct {
+	OIDCSDKVersion      string `yaml:"oidc-sdk-version,omitempty" json:"oidc-sdk-version,omitempty"`
+	RuntimeSDKVersion   string `yaml:"runtime-sdk-version,omitempty" json:"runtime-sdk-version,omitempty"`
+	StreamingSDKVersion string `yaml:"streaming-sdk-version,omitempty" json:"streaming-sdk-version,omitempty"`
+	OSType              string `yaml:"os-type,omitempty" json:"os-type,omitempty"`
+	OSVersion           string `yaml:"os-version,omitempty" json:"os-version,omitempty"`
+	NodeVersion         string `yaml:"node-version,omitempty" json:"node-version,omitempty"`
+	KiroVersion         string `yaml:"kiro-version,omitempty" json:"kiro-version,omitempty"`
+	KiroHash            string `yaml:"kiro-hash,omitempty" json:"kiro-hash,omitempty"`
 }
 
 // OpenAICompatibility represents the configuration for OpenAI API compatibility
@@ -679,6 +707,10 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.ErrorLogsMaxFiles = 10
 	}
 
+	if cfg.MaxRetryCredentials < 0 {
+		cfg.MaxRetryCredentials = 0
+	}
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -818,22 +850,24 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 		return
 	}
 
-	// Inject default Kiro aliases if no user-configured kiro aliases exist
+	// Inject channel defaults when the channel is absent in user config.
+	// Presence is checked case-insensitively and includes explicit nil/empty markers.
 	if cfg.OAuthModelAlias == nil {
 		cfg.OAuthModelAlias = make(map[string][]OAuthModelAlias)
 	}
-	if _, hasKiro := cfg.OAuthModelAlias["kiro"]; !hasKiro {
-		// Check case-insensitive too
-		found := false
+	hasChannel := func(channel string) bool {
 		for k := range cfg.OAuthModelAlias {
-			if strings.EqualFold(strings.TrimSpace(k), "kiro") {
-				found = true
-				break
+			if strings.EqualFold(strings.TrimSpace(k), channel) {
+				return true
 			}
 		}
-		if !found {
-			cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
-		}
+		return false
+	}
+	if !hasChannel("kiro") {
+		cfg.OAuthModelAlias["kiro"] = defaultKiroAliases()
+	}
+	if !hasChannel("github-copilot") {
+		cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
 	}
 
 	if len(cfg.OAuthModelAlias) == 0 {
