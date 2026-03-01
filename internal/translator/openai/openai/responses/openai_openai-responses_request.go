@@ -70,12 +70,38 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if role == "developer" {
 					role = "user"
 				}
-				message := `{"role":"","content":[]}`
+				message := `{"role":"","content":""}`
 				message, _ = sjson.Set(message, "role", role)
 
 				if content := item.Get("content"); content.Exists() && content.IsArray() {
 					var messageContent string
+					var richContent []interface{}
 					var toolCalls []interface{}
+
+					appendText := func(text string) {
+						if text == "" {
+							return
+						}
+						if len(richContent) > 0 {
+							richContent = append(richContent, map[string]any{"type": "text", "text": text})
+							return
+						}
+						if messageContent != "" {
+							messageContent += "\n" + text
+						} else {
+							messageContent = text
+						}
+					}
+
+					promoteToRich := func() {
+						if len(richContent) > 0 {
+							return
+						}
+						if messageContent != "" {
+							richContent = append(richContent, map[string]any{"type": "text", "text": messageContent})
+							messageContent = ""
+						}
+					}
 
 					content.ForEach(func(_, contentItem gjson.Result) bool {
 						contentType := contentItem.Get("type").String()
@@ -85,20 +111,26 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 						switch contentType {
 						case "input_text", "output_text":
-							text := contentItem.Get("text").String()
-							contentPart := `{"type":"text","text":""}`
-							contentPart, _ = sjson.Set(contentPart, "text", text)
-							message, _ = sjson.SetRaw(message, "content.-1", contentPart)
+							appendText(contentItem.Get("text").String())
 						case "input_image":
-							imageURL := contentItem.Get("image_url").String()
-							contentPart := `{"type":"image_url","image_url":{"url":""}}`
-							contentPart, _ = sjson.Set(contentPart, "image_url.url", imageURL)
-							message, _ = sjson.SetRaw(message, "content.-1", contentPart)
+							imageURL := strings.TrimSpace(contentItem.Get("image_url").String())
+							if imageURL == "" {
+								imageURL = strings.TrimSpace(contentItem.Get("image_url.url").String())
+							}
+							if imageURL != "" {
+								promoteToRich()
+								richContent = append(richContent, map[string]any{
+									"type": "image_url",
+									"image_url": map[string]any{"url": imageURL},
+								})
+							}
 						}
 						return true
 					})
 
-					if messageContent != "" {
+					if len(richContent) > 0 {
+						message, _ = sjson.Set(message, "content", richContent)
+					} else if messageContent != "" {
 						message, _ = sjson.Set(message, "content", messageContent)
 					}
 

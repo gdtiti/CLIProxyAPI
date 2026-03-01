@@ -711,6 +711,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	// Sync request authentication providers with inline API keys for backwards compatibility.
+	syncInlineAccessProvider(&cfg)
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -1024,6 +1027,18 @@ func normalizeModelPrefix(prefix string) string {
 	return trimmed
 }
 
+func syncInlineAccessProvider(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if len(cfg.APIKeys) == 0 {
+		if provider := cfg.ConfigAPIKeyProvider(); provider != nil && len(provider.APIKeys) > 0 {
+			cfg.APIKeys = append([]string(nil), provider.APIKeys...)
+		}
+	}
+	cfg.Access.Providers = nil
+}
+
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
 func looksLikeBcrypt(s string) bool {
 	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
@@ -1111,7 +1126,7 @@ func hashSecret(secret string) (string, error) {
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
-	persistCfg := cfg
+	persistCfg := sanitizeConfigForPersist(cfg)
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -1177,6 +1192,16 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	data = NormalizeCommentIndentation(buf.Bytes())
 	_, err = f.Write(data)
 	return err
+}
+
+func sanitizeConfigForPersist(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	clone.SDKConfig = cfg.SDKConfig
+	clone.SDKConfig.Access = AccessConfig{}
+	return &clone
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -2010,10 +2035,9 @@ func removeLegacyGenerativeLanguageKeys(root *yaml.Node) {
 }
 
 func removeLegacyAuthBlock(root *yaml.Node) {
-	if root == nil || root.Kind != yaml.MappingNode {
-		return
-	}
-	removeMapKey(root, "auth")
+	// "auth" is now the canonical key for request authentication providers.
+	// Keep it during persistence instead of treating it as a legacy field.
+	_ = root
 }
 
 // GetCodeAssistEndpoint returns the Code Assist endpoint, with fallback to default

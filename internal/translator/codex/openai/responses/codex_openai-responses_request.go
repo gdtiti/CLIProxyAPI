@@ -29,6 +29,10 @@ func ConvertOpenAIResponsesRequestToCodex(modelName string, inputRawJSON []byte,
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "truncation")
 	rawJSON = applyResponsesCompactionCompatibility(rawJSON)
 
+	// When store=false, items (rs_, msg_, fc_) are not persisted on the upstream.
+	// Strip item_reference entries from input to avoid "Item with id ... not found" errors.
+	rawJSON = stripItemReferencesFromInput(rawJSON)
+
 	// Delete the user field as it is not supported by the Codex upstream.
 	rawJSON, _ = sjson.DeleteBytes(rawJSON, "user")
 
@@ -76,4 +80,62 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 	}
 
 	return result
+}
+
+// stripItemReferencesFromInput removes item_reference (and item_ref) entries from the input.
+// When store=false, items (rs_, msg_, fc_) are not persisted on the upstream, so referencing
+// them causes "Item with id ... not found" errors. Stripping these refs avoids the error.
+func stripItemReferencesFromInput(rawJSON []byte) []byte {
+	inputResult := gjson.GetBytes(rawJSON, "input")
+	if !inputResult.IsArray() {
+		return rawJSON
+	}
+
+	inputArray := inputResult.Array()
+	var newInput []interface{}
+	changed := false
+	for _, item := range inputArray {
+		if isItemReference(item) {
+			changed = true
+			continue
+		}
+		// Also strip item_refs from message content
+		if item.Get("type").String() == "message" {
+			content := item.Get("content")
+			if content.IsArray() {
+				contentArr := content.Array()
+				var filteredContent []interface{}
+				contentStripped := false
+				for _, c := range contentArr {
+					if !isItemReference(c) {
+						filteredContent = append(filteredContent, gjson.Parse(c.Raw).Value())
+					} else {
+						contentStripped = true
+					}
+				}
+				if contentStripped {
+					changed = true
+					itemVal := gjson.Parse(item.Raw).Value()
+					if m, ok := itemVal.(map[string]interface{}); ok {
+						m["content"] = filteredContent
+						newInput = append(newInput, m)
+						continue
+					}
+				}
+			}
+		}
+		newInput = append(newInput, gjson.Parse(item.Raw).Value())
+	}
+
+	if !changed {
+		return rawJSON
+	}
+
+	result, _ := sjson.SetBytes(rawJSON, "input", newInput)
+	return result
+}
+
+func isItemReference(item gjson.Result) bool {
+	t := item.Get("type").String()
+	return t == "item_reference" || t == "item_ref"
 }

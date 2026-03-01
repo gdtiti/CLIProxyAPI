@@ -4,16 +4,12 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
@@ -498,17 +494,13 @@ func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 	conversationID := generateUUID()
 	r.Header.Set("conversation-id", conversationID)
 
-	// 不再主动设置 Accept 头，使用 HTTP 客户端默认行为
-	// 这避免了某些上游节点因显式 Accept: text/event-stream 而返回 406
-}
-
-// retryWithoutSignature 移除签名头后重试请求
-func (e *IFlowExecutor) retryWithoutSignature(ctx context.Context, httpReq *http.Request, body []byte, isStream bool) (*http.Response, error) {
-	// 创建新的请求，移除签名头
-	newReq, err := http.NewRequestWithContext(ctx, httpReq.Method, httpReq.URL.String(), bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	// 设置Accept头
+	if stream {
+		r.Header.Set("Accept", "text/event-stream")
+	} else {
+		r.Header.Set("Accept", "application/json")
 	}
+}
 
 	// 复制原请求的头，但移除签名相关头（使用 CanonicalMIMEHeaderKey 进行大小写不敏感比较）
 	for key, values := range httpReq.Header {
@@ -542,23 +534,6 @@ func (e *IFlowExecutor) retryWithoutSignature(ctx context.Context, httpReq *http
 
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, nil, 0)
 	return httpClient.Do(newReq)
-}
-
-// createIFlowSignature generates HMAC-SHA256 signature for iFlow API requests.
-// The signature payload format is: userAgent:sessionId:timestamp
-func createIFlowSignature(userAgent, sessionID string, timestamp int64, apiKey string) string {
-	if apiKey == "" {
-		return ""
-	}
-	payload := fmt.Sprintf("%s:%s:%d", userAgent, sessionID, timestamp)
-	h := hmac.New(sha256.New, []byte(apiKey))
-	h.Write([]byte(payload))
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// generateUUID generates a random UUID v4 string.
-func generateUUID() string {
-	return uuid.New().String()
 }
 
 func iflowCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {

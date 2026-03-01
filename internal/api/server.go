@@ -711,17 +711,14 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
+			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
+			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
+
+		log.WithError(err).Error("failed to stat management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
 	}
 
 	c.File(filePath)
@@ -1089,10 +1086,14 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			return
 		}
 
-		statusCode := err.HTTPStatusCode()
-		if statusCode >= http.StatusInternalServerError {
+		switch {
+		case errors.Is(err, sdkaccess.ErrNoCredentials):
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing API key"})
+		case errors.Is(err, sdkaccess.ErrInvalidCredential):
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+		default:
 			log.Errorf("authentication middleware error: %v", err)
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Authentication service error"})
 		}
-		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
 }
