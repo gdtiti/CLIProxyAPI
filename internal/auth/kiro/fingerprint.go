@@ -280,9 +280,9 @@ func setRuntimeHeaders(req *http.Request, accessToken string, accountKey string)
 // IDCFingerprint stores device fingerprint for IDC enterprise accounts
 // SDK version is fixed (aws-sdk-rust/1.3.9), but OS type/version are randomized once and persisted
 type IDCFingerprint struct {
-	OSType     string `json:"osType"`              // macos, windows, linux
-	OSVersion  string `json:"osVersion"`           // e.g., "14.0", "10.0.22621"
-	SDKVersion string `json:"sdkVersion,omitempty"` // e.g., "1.3.9", "1.3.10" (optional, defaults to 1.3.9)
+	OSType      string `json:"osType"`                // macos, windows, linux
+	OSVersion   string `json:"osVersion"`             // e.g., "14.0", "10.0.22621"
+	SDKVersion  string `json:"sdkVersion,omitempty"`  // e.g., "1.3.9", "1.3.10" (optional, defaults to 1.3.9)
 	RustVersion string `json:"rustVersion,omitempty"` // e.g., "1.87.0", "1.86.0" (optional)
 }
 
@@ -307,21 +307,21 @@ var idcOSVersions = map[string][]string{
 // GenerateIDCFingerprint generates a new IDC fingerprint with randomized OS and SDK info
 func GenerateIDCFingerprint() *IDCFingerprint {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	
+
 	// Random OS type
 	osTypes := []string{"macos", "windows", "linux"}
 	osType := osTypes[rng.Intn(len(osTypes))]
-	
+
 	// Random OS version for the selected OS type
 	versions := idcOSVersions[osType]
 	osVersion := versions[rng.Intn(len(versions))]
-	
+
 	// Random SDK version
 	sdkVersion := idcSDKVersions[rng.Intn(len(idcSDKVersions))]
-	
+
 	// Random Rust version
 	rustVersion := idcRustVersions[rng.Intn(len(idcRustVersions))]
-	
+
 	return &IDCFingerprint{
 		OSType:      osType,
 		OSVersion:   osVersion,
@@ -349,37 +349,13 @@ func (fp *IDCFingerprint) getRustVersion() string {
 // BuildUserAgent builds the User-Agent string for IDC auth (Amazon Q CLI style)
 // Format: aws-sdk-rust/{sdkVersion} os/{osType} lang/rust/{rustVersion}
 func (fp *IDCFingerprint) BuildUserAgent() string {
-	return fmt.Sprintf("aws-sdk-rust/%s os/%s lang/rust/%s", 
+	return fmt.Sprintf("aws-sdk-rust/%s os/%s lang/rust/%s",
 		fp.getSDKVersion(), fp.OSType, fp.getRustVersion())
 }
 
 // BuildAmzUserAgent builds the X-Amz-User-Agent string for IDC auth
 // Format: aws-sdk-rust/{sdkVersion} ua/2.1 api/ssooidc/1.88.0 os/{osType} lang/rust/{rustVersion} m/E app/AmazonQ-For-CLI
 func (fp *IDCFingerprint) BuildAmzUserAgent() string {
-	return fmt.Sprintf("aws-sdk-rust/%s ua/2.1 api/ssooidc/1.88.0 os/%s lang/rust/%s m/E app/AmazonQ-For-CLI", 
+	return fmt.Sprintf("aws-sdk-rust/%s ua/2.1 api/ssooidc/1.88.0 os/%s lang/rust/%s m/E app/AmazonQ-For-CLI",
 		fp.getSDKVersion(), fp.OSType, fp.getRustVersion())
-}
-func SetOIDCHeaders(req *http.Request) {
-	fp := GlobalFingerprintManager().GetFingerprint("oidc-session")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-amz-user-agent", fmt.Sprintf("aws-sdk-js/%s KiroIDE", fp.OIDCSDKVersion))
-	req.Header.Set("User-Agent", fmt.Sprintf(
-		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/%s#%s m/E KiroIDE",
-		fp.OIDCSDKVersion, fp.OSType, fp.OSVersion, fp.NodeVersion, "sso-oidc", fp.OIDCSDKVersion))
-	req.Header.Set("amz-sdk-invocation-id", uuid.New().String())
-	req.Header.Set("amz-sdk-request", "attempt=1; max=4")
-}
-
-func setRuntimeHeaders(req *http.Request, accessToken string, accountKey string) {
-	fp := GlobalFingerprintManager().GetFingerprint(accountKey)
-	machineID := fp.KiroHash
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("x-amz-user-agent", fmt.Sprintf("aws-sdk-js/%s KiroIDE-%s-%s",
-		fp.RuntimeSDKVersion, fp.KiroVersion, machineID))
-	req.Header.Set("User-Agent", fmt.Sprintf(
-		"aws-sdk-js/%s ua/2.1 os/%s#%s lang/js md/nodejs#%s api/codewhispererruntime#%s m/N,E KiroIDE-%s-%s",
-		fp.RuntimeSDKVersion, fp.OSType, fp.OSVersion, fp.NodeVersion, fp.RuntimeSDKVersion,
-		fp.KiroVersion, machineID))
-	req.Header.Set("amz-sdk-invocation-id", uuid.New().String())
-	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
 }

@@ -515,12 +515,6 @@ func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 	log.Debugf("kiro: using dynamic fingerprint for account %s (SDK:%s, OS:%s/%s, Kiro:%s)",
 		keyPrefix+"...", fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 }
-	if len(keyPrefix) > 8 {
-		keyPrefix = keyPrefix[:8]
-	}
-	log.Debugf("kiro: using dynamic fingerprint for account %s (SDK:%s, OS:%s/%s, Kiro:%s)",
-		keyPrefix+"...", fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
-}
 
 // PrepareRequest prepares the HTTP request before execution.
 func (e *KiroExecutor) PrepareRequest(req *http.Request, auth *cliproxyauth.Auth) error {
@@ -1506,6 +1500,20 @@ func getMachineID(auth *cliproxyauth.Auth) string {
 
 	// Generate new UUID if not found
 	return uuid.New().String()
+}
+
+// isIDCAuth determines whether the auth record is IDC mode.
+func isIDCAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	if authMethod, ok := auth.Metadata["auth_method"].(string); ok && strings.EqualFold(strings.TrimSpace(authMethod), "idc") {
+		return true
+	}
+	if authMethod, ok := auth.Metadata["authMethod"].(string); ok && strings.EqualFold(strings.TrimSpace(authMethod), "idc") {
+		return true
+	}
+	return false
 }
 
 // buildUserAgentHeaders builds User-Agent and X-Amz-User-Agent headers with machine_id.
