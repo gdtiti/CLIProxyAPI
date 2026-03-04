@@ -25,18 +25,23 @@ copilot-messages.log
 *.bz2
 *.xz
 
-# Windows executables and installers
+# Binaries
+cli-proxy-api
+cliproxy
 *.exe
-*.msi
-*.bat
-*.cmd
-*.com
-*.scr
-*.dll
 
-# macOS executables and disk images
-*.dmg
-*.pkg
+
+# Configuration
+config.yaml
+.env
+.mcp.json
+# Generated content
+bin/*
+logs/*
+conv/*
+temp/*
+refs/*
+tmp/*
 
 # Disk images and virtual machine files
 *.iso
@@ -44,6 +49,41 @@ copilot-messages.log
 *.vhd
 *.vmdk
 
-# System files
+# Storage backends
+pgstore/*
+gitstore/*
+objectstore/*
+
+# Static assets
+static/*
+
+# Authentication data
+auths/*
+!auths/.gitkeep
+
+# Documentation
+docs/*
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# Tooling metadata
+.vscode/*
+.codex/*
+.claude/*
+.gemini/*
+.serena/*
+.agent/*
+.agents/*
+.opencode/*
+.idea/*
+.bmad/*
+_bmad/*
+_bmad-output/*
+.mcp/cache/
+
+# macOS
 .DS_Store
+._*
+*.bak
 .project/attachments/files/**
