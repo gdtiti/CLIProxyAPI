@@ -668,7 +668,7 @@ func main() {
 			// PG Usage 持久化初始化
 			var usagePlugin *usage.LoggerPlugin
 			if usePostgresStore && pgStoreDSN != "" {
-				usageDB, errDB := sql.Open("postgres", pgStoreDSN)
+				usageDB, errDB := sql.Open("pgx", pgStoreDSN)
 				if errDB != nil {
 					log.Errorf("failed to open PG for usage: %v", errDB)
 				} else {
