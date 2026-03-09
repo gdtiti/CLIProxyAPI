@@ -34,6 +34,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
@@ -50,13 +51,14 @@ import (
 var lastRefreshKeys = []string{"last_refresh", "lastRefresh", "last_refreshed_at", "lastRefreshedAt"}
 
 const (
-	anthropicCallbackPort = 54545
-	geminiCallbackPort    = 8085
-	codexCallbackPort     = 1455
-	geminiCLIEndpoint     = "https://cloudcode-pa.googleapis.com"
-	geminiCLIVersion      = "v1internal"
-	managementDisabledMsg = "disabled via management API"
-	authReloadSuperseded  = "superseded by auth file reload"
+	anthropicCallbackPort   = 54545
+	geminiCallbackPort      = 8085
+	codexCallbackPort       = 1455
+	geminiCLIEndpoint       = "https://cloudcode-pa.googleapis.com"
+	geminiCLIVersion        = "v1internal"
+	managementDisabledMsg   = "disabled via management API"
+	authReloadSuperseded    = "superseded by auth file reload"
+	maxBatchAuthFileUpdates = 500
 )
 
 type callbackForwarder struct {
@@ -1222,6 +1224,314 @@ func (h *Handler) registerAuthFromFile(ctx context.Context, path string, data []
 		}
 	}
 	return h.reloadAuthFile(ctx, path, data)
+}
+
+type patchAuthFilesExcludedModelsBatchRequest struct {
+	Names       []string `json:"names"`
+	Operation   string   `json:"operation"`
+	Models      []string `json:"models"`
+	DryRun      bool     `json:"dry_run"`
+	StopOnError bool     `json:"stop_on_error"`
+}
+
+type patchAuthFilesExcludedModelsBatchSummary struct {
+	Total     int `json:"total"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+}
+
+type patchAuthFilesExcludedModelsBatchResult struct {
+	Name    string   `json:"name"`
+	Status  string   `json:"status"`
+	Changed bool     `json:"changed"`
+	Before  []string `json:"before"`
+	After   []string `json:"after"`
+	Error   string   `json:"error,omitempty"`
+}
+
+type patchAuthFilesExcludedModelsBatchResponse struct {
+	Status    string                                    `json:"status"`
+	Operation string                                    `json:"operation"`
+	DryRun    bool                                      `json:"dry_run"`
+	Summary   patchAuthFilesExcludedModelsBatchSummary  `json:"summary"`
+	Results   []patchAuthFilesExcludedModelsBatchResult `json:"results"`
+}
+
+// PatchAuthFilesExcludedModelsBatch batch-updates excluded_models in selected auth JSON files.
+// PATCH /v0/management/auth-files/excluded-models/batch
+func (h *Handler) PatchAuthFilesExcludedModelsBatch(c *gin.Context) {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth directory is not configured"})
+		return
+	}
+
+	var req patchAuthFilesExcludedModelsBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	names := normalizeBatchAuthFileNames(req.Names)
+	if len(names) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "names is required"})
+		return
+	}
+	if len(names) > maxBatchAuthFileUpdates {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many names, max is %d", maxBatchAuthFileUpdates)})
+		return
+	}
+
+	operation := strings.ToLower(strings.TrimSpace(req.Operation))
+	if operation == "" {
+		operation = "set"
+	}
+	switch operation {
+	case "set", "add", "remove", "clear":
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid operation, allowed: set/add/remove/clear"})
+		return
+	}
+
+	models := config.NormalizeExcludedModels(req.Models)
+	if operation != "clear" && len(models) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "models is required for set/add/remove"})
+		return
+	}
+
+	resp := patchAuthFilesExcludedModelsBatchResponse{
+		Operation: operation,
+		DryRun:    req.DryRun,
+		Summary: patchAuthFilesExcludedModelsBatchSummary{
+			Total: len(names),
+		},
+		Results: make([]patchAuthFilesExcludedModelsBatchResult, 0, len(names)),
+	}
+
+	ctx := c.Request.Context()
+	stopped := false
+	for _, name := range names {
+		result := patchAuthFilesExcludedModelsBatchResult{Name: name}
+
+		if stopped {
+			result.Status = "skipped"
+			resp.Summary.Skipped++
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		before, after, changed, err := h.applyExcludedModelsPatchToAuthFile(ctx, name, operation, models, req.DryRun)
+		result.Before = before
+		result.After = after
+		result.Changed = changed
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			resp.Summary.Failed++
+			if req.StopOnError {
+				stopped = true
+			}
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		if changed {
+			if req.DryRun {
+				result.Status = "would_update"
+			} else {
+				result.Status = "updated"
+			}
+			resp.Summary.Updated++
+		} else {
+			result.Status = "unchanged"
+			resp.Summary.Unchanged++
+		}
+		resp.Results = append(resp.Results, result)
+	}
+
+	if req.DryRun {
+		resp.Status = "dry_run"
+	} else if resp.Summary.Failed > 0 {
+		resp.Status = "partial"
+	} else {
+		resp.Status = "ok"
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) applyExcludedModelsPatchToAuthFile(ctx context.Context, name, operation string, models []string, dryRun bool) ([]string, []string, bool, error) {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		return nil, nil, false, fmt.Errorf("auth directory is not configured")
+	}
+	if err := validateAuthFileName(name); err != nil {
+		return nil, nil, false, err
+	}
+
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if !filepath.IsAbs(full) {
+		if abs, errAbs := filepath.Abs(full); errAbs == nil {
+			full = abs
+		}
+	}
+
+	data, errRead := os.ReadFile(full)
+	if errRead != nil {
+		if os.IsNotExist(errRead) {
+			return nil, nil, false, fmt.Errorf("file not found")
+		}
+		return nil, nil, false, fmt.Errorf("failed to read file: %w", errRead)
+	}
+
+	metadata := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		return nil, nil, false, fmt.Errorf("invalid auth file format: %w", errUnmarshal)
+	}
+
+	before := readExcludedModelsFromMetadata(metadata)
+	after := buildUpdatedExcludedModels(before, operation, models)
+	changed := !stringSlicesEqual(before, after)
+	if !changed || dryRun {
+		return before, after, changed, nil
+	}
+
+	if len(after) == 0 {
+		delete(metadata, "excluded_models")
+		delete(metadata, "excluded-models")
+	} else {
+		metadata["excluded_models"] = after
+		delete(metadata, "excluded-models")
+	}
+
+	newData, errMarshal := json.MarshalIndent(metadata, "", "  ")
+	if errMarshal != nil {
+		return before, after, changed, fmt.Errorf("failed to serialize file: %w", errMarshal)
+	}
+	if errWrite := os.WriteFile(full, newData, 0o600); errWrite != nil {
+		return before, after, changed, fmt.Errorf("failed to write file: %w", errWrite)
+	}
+	if errReload := h.reloadAuthFile(ctx, full, newData); errReload != nil {
+		return before, after, changed, fmt.Errorf("failed to reload auth file: %w", errReload)
+	}
+	return before, after, changed, nil
+}
+
+func normalizeBatchAuthFileNames(names []string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, name)
+	}
+	return out
+}
+
+func validateAuthFileName(name string) error {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return fmt.Errorf("invalid name")
+	}
+	if strings.Contains(trimmed, "/") || strings.Contains(trimmed, "\\") || strings.Contains(trimmed, string(os.PathSeparator)) {
+		return fmt.Errorf("invalid name")
+	}
+	if !strings.HasSuffix(strings.ToLower(trimmed), ".json") {
+		return fmt.Errorf("name must end with .json")
+	}
+	return nil
+}
+
+func readExcludedModelsFromMetadata(metadata map[string]any) []string {
+	if metadata == nil {
+		return nil
+	}
+	raw, ok := metadata["excluded_models"]
+	if !ok {
+		raw, ok = metadata["excluded-models"]
+	}
+	if !ok || raw == nil {
+		return nil
+	}
+
+	items := make([]string, 0)
+	switch v := raw.(type) {
+	case []string:
+		items = append(items, v...)
+	case []any:
+		for _, entry := range v {
+			if s, ok := entry.(string); ok {
+				items = append(items, s)
+			}
+		}
+	case string:
+		for _, part := range strings.Split(v, ",") {
+			items = append(items, part)
+		}
+	default:
+		return nil
+	}
+	return config.NormalizeExcludedModels(items)
+}
+
+func buildUpdatedExcludedModels(before []string, operation string, models []string) []string {
+	current := config.NormalizeExcludedModels(before)
+	switch operation {
+	case "clear":
+		return nil
+	case "set":
+		out := make([]string, len(models))
+		copy(out, models)
+		return out
+	case "add":
+		merged := make([]string, 0, len(current)+len(models))
+		merged = append(merged, current...)
+		merged = append(merged, models...)
+		return config.NormalizeExcludedModels(merged)
+	case "remove":
+		if len(current) == 0 || len(models) == 0 {
+			return current
+		}
+		removeSet := make(map[string]struct{}, len(models))
+		for _, model := range models {
+			removeSet[model] = struct{}{}
+		}
+		out := make([]string, 0, len(current))
+		for _, model := range current {
+			if _, drop := removeSet[model]; drop {
+				continue
+			}
+			out = append(out, model)
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return current
+	}
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // PatchAuthFileStatus toggles the disabled state of an auth file
