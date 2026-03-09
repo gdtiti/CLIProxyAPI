@@ -40,7 +40,7 @@ func (e *blockingRefreshExecutor) HttpRequest(context.Context, *Auth, *http.Requ
 	return nil, nil
 }
 
-func TestDynamicPOC_RefreshCanOverwriteMarkResultState(t *testing.T) {
+func TestDynamicPOC_RefreshPreservesMarkResultState(t *testing.T) {
 	t.Parallel()
 
 	mgr := NewManager(nil, nil, nil)
@@ -102,8 +102,14 @@ func TestDynamicPOC_RefreshCanOverwriteMarkResultState(t *testing.T) {
 	afterGlobal := after.ModelStates[globalModelStateKey]
 	t.Logf("after refresh update: model=%v global=%v auth_quota_exceeded=%v auth_next_retry=%v", afterModel, afterGlobal, after.Quota.Exceeded, after.NextRetryAfter)
 
-	if afterModel != nil || afterGlobal != nil || after.Quota.Exceeded {
-		t.Fatalf("lost-update POC not reproduced: expected refresh overwrite to clear MarkResult state")
+	if afterModel == nil || afterGlobal == nil {
+		t.Fatalf("refresh should preserve model/global state, got model=%v global=%v", afterModel, afterGlobal)
+	}
+	if !after.Quota.Exceeded {
+		t.Fatalf("refresh should preserve aggregated auth quota state")
+	}
+	if after.NextRetryAfter.IsZero() {
+		t.Fatalf("refresh should preserve aggregated next retry state")
 	}
 }
 
