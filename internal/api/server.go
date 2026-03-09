@@ -59,6 +59,8 @@ type serverOptionConfig struct {
 // ServerOption customises HTTP server construction.
 type ServerOption func(*serverOptionConfig)
 
+type ManagementReloadHooks = managementHandlers.RuntimeReloadHooks
+
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
 	logsDir := logging.ResolveLogDirectory(cfg)
@@ -124,6 +126,14 @@ func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthHook = hook
 	}
+}
+
+// SetManagementReloadHooks wires management-only runtime reload callbacks after server construction.
+func (s *Server) SetManagementReloadHooks(hooks ManagementReloadHooks) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetRuntimeReloadHooks(hooks)
 }
 
 // Server represents the main API server.
@@ -530,6 +540,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
+		mgmt.POST("/config.yaml/reload-from-store", s.mgmt.PostReloadConfigFromStore)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
 
 		mgmt.GET("/debug", s.mgmt.GetDebug)
@@ -666,6 +677,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
+		mgmt.POST("/auth-files/reload-from-store", s.mgmt.PostReloadAuthFilesFromStore)
 
 		mgmt.PATCH("/auth-files/excluded-models/batch", s.mgmt.PatchAuthFilesExcludedModelsBatch)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)

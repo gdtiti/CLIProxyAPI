@@ -34,5 +34,11 @@ func defaultWatcherFactory(configPath, authDir string, reload func(*config.Confi
 		notifyTokenRefreshed: func(tokenID, accessToken, refreshToken, expiresAt string) {
 			w.NotifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt)
 		},
+		reloadConfigFromDisk: func() error {
+			return w.ReloadConfigNow()
+		},
+		reloadAuthFiles: func(forceAuthRefresh bool) error {
+			return w.ReloadAuthFilesNow(forceAuthRefresh)
+		},
 	}, nil
 }

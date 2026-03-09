@@ -27,6 +27,11 @@ type attemptInfo struct {
 	lastActivity time.Time // track last activity for cleanup
 }
 
+type RuntimeReloadHooks struct {
+	ReloadConfigFromDisk    func() error
+	ReloadAuthFilesFromDisk func() error
+}
+
 // attemptCleanupInterval controls how often stale IP entries are purged
 const attemptCleanupInterval = 1 * time.Hour
 
@@ -49,6 +54,8 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	reloadConfigHook    func() error
+	reloadAuthFilesHook func() error
 }
 
 // NewHandler creates a new management handler instance.
@@ -136,6 +143,12 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// SetRuntimeReloadHooks registers callbacks that refresh runtime state from mirrored disk files.
+func (h *Handler) SetRuntimeReloadHooks(hooks RuntimeReloadHooks) {
+	h.reloadConfigHook = hooks.ReloadConfigFromDisk
+	h.reloadAuthFilesHook = hooks.ReloadAuthFilesFromDisk
 }
 
 // Middleware enforces access control for management endpoints.

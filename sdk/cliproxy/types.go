@@ -90,6 +90,8 @@ type WatcherWrapper struct {
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
+	reloadConfigFromDisk  func() error
+	reloadAuthFiles       func(forceAuthRefresh bool) error
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -159,4 +161,20 @@ func (w *WatcherWrapper) NotifyTokenRefreshed(tokenID, accessToken, refreshToken
 		return
 	}
 	w.notifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt)
+}
+
+// ReloadConfigFromDisk forces the watcher to reload config from the mirrored file on disk.
+func (w *WatcherWrapper) ReloadConfigFromDisk() error {
+	if w == nil || w.reloadConfigFromDisk == nil {
+		return nil
+	}
+	return w.reloadConfigFromDisk()
+}
+
+// ReloadAuthFiles rescans mirrored auth files and rebuilds runtime state.
+func (w *WatcherWrapper) ReloadAuthFiles(forceAuthRefresh bool) error {
+	if w == nil || w.reloadAuthFiles == nil {
+		return nil
+	}
+	return w.reloadAuthFiles(forceAuthRefresh)
 }

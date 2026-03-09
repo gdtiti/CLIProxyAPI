@@ -643,6 +643,16 @@ func (s *Service) Run(ctx context.Context) error {
 		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 	}
 	watcherWrapper.SetConfig(s.cfg)
+	if s.server != nil {
+		s.server.SetManagementReloadHooks(api.ManagementReloadHooks{
+			ReloadConfigFromDisk: func() error {
+				return watcherWrapper.ReloadConfigFromDisk()
+			},
+			ReloadAuthFilesFromDisk: func() error {
+				return watcherWrapper.ReloadAuthFiles(true)
+			},
+		})
+	}
 
 	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
 	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
