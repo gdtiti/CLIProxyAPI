@@ -100,3 +100,17 @@ func (c *JWTClaims) GetUserEmail() string {
 func (c *JWTClaims) GetAccountID() string {
 	return c.CodexAuthInfo.ChatgptAccountID
 }
+
+// AccountIDFromIDToken extracts the ChatGPT account ID from an ID token.
+// It returns an empty string when the token is blank or cannot be parsed.
+func AccountIDFromIDToken(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return ""
+	}
+	claims, err := ParseJWTToken(token)
+	if err != nil || claims == nil {
+		return ""
+	}
+	return strings.TrimSpace(claims.GetAccountID())
+}

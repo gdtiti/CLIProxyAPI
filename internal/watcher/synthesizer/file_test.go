@@ -1,6 +1,7 @@
 package synthesizer
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -156,6 +157,43 @@ func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_CodexAccountIDFromIDToken(t *testing.T) {
+	tempDir := t.TempDir()
+
+	idToken := buildTestJWT(t, "acc-123")
+	authData := map[string]any{
+		"type":         "codex",
+		"id_token":     idToken,
+		"access_token": "test-access",
+	}
+	data, _ := json.Marshal(authData)
+	err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0644)
+	if err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+
+	accountID, _ := auths[0].Metadata["account_id"].(string)
+	if accountID != "acc-123" {
+		t.Fatalf("expected account_id acc-123, got %q", accountID)
+	}
+}
+
 func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {
 	tempDir := t.TempDir()
 
@@ -187,6 +225,24 @@ func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {
 	if auths[0].Label != "valid@example.com" {
 		t.Errorf("expected label valid@example.com, got %s", auths[0].Label)
 	}
+}
+
+func buildTestJWT(t *testing.T, accountID string) string {
+	t.Helper()
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := map[string]any{
+		"email": "test@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": accountID,
+		},
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("failed to marshal JWT payload: %v", err)
+	}
+	payloadEnc := base64.RawURLEncoding.EncodeToString(payloadJSON)
+	return header + "." + payloadEnc + "."
 }
 
 func TestFileSynthesizer_Synthesize_SkipsDirectories(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	codexauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
@@ -81,6 +82,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	provider := strings.ToLower(t)
 	if provider == "gemini" {
 		provider = "gemini-cli"
+	}
+	if provider == "codex" {
+		enrichCodexMetadata(metadata)
 	}
 	label := provider
 	if email, _ := metadata["email"].(string); email != "" {
@@ -281,6 +285,23 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
 	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
+}
+
+func enrichCodexMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	accountID, _ := metadata["account_id"].(string)
+	accountID = strings.TrimSpace(accountID)
+	if accountID != "" {
+		metadata["account_id"] = accountID
+		return
+	}
+	idToken, _ := metadata["id_token"].(string)
+	accountID = codexauth.AccountIDFromIDToken(idToken)
+	if accountID != "" {
+		metadata["account_id"] = accountID
+	}
 }
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.

@@ -61,6 +61,10 @@ const (
 	maxBatchAuthFileUpdates = 500
 )
 
+type authFilesStorePersister interface {
+	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
+}
+
 type callbackForwarder struct {
 	provider string
 	server   *http.Server
@@ -675,23 +679,19 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 			c.JSON(400, gin.H{"error": "file must be .json"})
 			return
 		}
-		dst := filepath.Join(h.cfg.AuthDir, name)
-		if !filepath.IsAbs(dst) {
-			if abs, errAbs := filepath.Abs(dst); errAbs == nil {
-				dst = abs
-			}
-		}
-		if errSave := c.SaveUploadedFile(file, dst); errSave != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to save file: %v", errSave)})
+		src, errOpen := file.Open()
+		if errOpen != nil {
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to open uploaded file: %v", errOpen)})
 			return
 		}
-		data, errRead := os.ReadFile(dst)
+		defer src.Close()
+		data, errRead := io.ReadAll(src)
 		if errRead != nil {
-			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read saved file: %v", errRead)})
+			c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read uploaded file: %v", errRead)})
 			return
 		}
-		if errReg := h.registerAuthFromFile(ctx, dst, data); errReg != nil {
-			c.JSON(500, gin.H{"error": errReg.Error()})
+		if errPersist := h.persistUploadedAuthFile(ctx, name, data); errPersist != nil {
+			c.JSON(500, gin.H{"error": errPersist.Error()})
 			return
 		}
 		c.JSON(200, gin.H{"status": "ok"})
@@ -711,21 +711,115 @@ func (h *Handler) UploadAuthFile(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "failed to read body"})
 		return
 	}
-	dst := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if err = h.persistUploadedAuthFile(ctx, filepath.Base(name), data); err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"status": "ok"})
+}
+
+func (h *Handler) persistUploadedAuthFile(ctx context.Context, name string, data []byte) error {
+	path, err := h.uploadedAuthFilePath(name)
+	if err != nil {
+		return err
+	}
+	if err = h.validateUploadedAuthFile(path, data); err != nil {
+		return err
+	}
+
+	previous, hadPrevious, err := snapshotExistingAuthFile(path)
+	if err != nil {
+		return err
+	}
+	if err = os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("failed to prepare auth dir: %w", err)
+	}
+	if err = os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	if err = h.persistUploadedAuthToStore(ctx, path); err != nil {
+		if restoreErr := restoreUploadedAuthFile(path, previous, hadPrevious); restoreErr != nil {
+			log.WithError(restoreErr).Warnf("failed to restore auth file after store persist error: %s", filepath.Base(path))
+		}
+		return err
+	}
+	if err = h.registerAuthFromFile(ctx, path, data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (h *Handler) uploadedAuthFilePath(name string) (string, error) {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" || strings.Contains(name, string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid name")
+	}
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		return "", fmt.Errorf("auth dir is not configured")
+	}
+	dst := filepath.Join(h.cfg.AuthDir, name)
 	if !filepath.IsAbs(dst) {
 		if abs, errAbs := filepath.Abs(dst); errAbs == nil {
 			dst = abs
 		}
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
-		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to write file: %v", errWrite)})
-		return
+	return dst, nil
+}
+
+func (h *Handler) validateUploadedAuthFile(path string, data []byte) error {
+	authDir := ""
+	if h != nil && h.cfg != nil {
+		authDir = strings.TrimSpace(h.cfg.AuthDir)
 	}
-	if err = h.registerAuthFromFile(ctx, dst, data); err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
+	auths := synthesizer.SynthesizeAuthFile(&synthesizer.SynthesisContext{
+		Config:  h.cfg,
+		AuthDir: authDir,
+		Now:     time.Now(),
+	}, path, data)
+	if len(auths) == 0 {
+		return fmt.Errorf("invalid auth file")
 	}
-	c.JSON(200, gin.H{"status": "ok"})
+	return nil
+}
+
+func (h *Handler) persistUploadedAuthToStore(ctx context.Context, path string) error {
+	store := h.tokenStoreWithBaseDir()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	persister, ok := store.(authFilesStorePersister)
+	if !ok {
+		return nil
+	}
+	if err := persister.PersistAuthFiles(ctx, fmt.Sprintf("Upload auth %s", filepath.Base(path)), path); err != nil {
+		return fmt.Errorf("failed to persist auth file to store: %w", err)
+	}
+	return nil
+}
+
+func snapshotExistingAuthFile(path string) ([]byte, bool, error) {
+	previous, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		return previous, true, nil
+	case errors.Is(err, os.ErrNotExist):
+		return nil, false, nil
+	default:
+		return nil, false, fmt.Errorf("failed to read existing auth file: %w", err)
+	}
+}
+
+func restoreUploadedAuthFile(path string, previous []byte, hadPrevious bool) error {
+	if hadPrevious {
+		if err := os.WriteFile(path, previous, 0o600); err != nil {
+			return fmt.Errorf("restore previous auth file: %w", err)
+		}
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove new auth file after failure: %w", err)
+	}
+	return nil
 }
 
 // Delete auth files: single by name or all
