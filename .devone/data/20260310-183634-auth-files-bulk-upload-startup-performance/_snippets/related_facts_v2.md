@@ -1,0 +1,26 @@
+﻿- 现有实现: 管理端已有 `POST /auth-files`、`POST /auth-files/reload-from-store`、`PATCH /auth-files/excluded-models/batch` 等路由，但无批量上传入口（`internal/api/server.go`）。
+- 单文件上传链路: `UploadAuthFile -> persistUploadedAuthFile -> validateUploadedAuthFile -> persistUploadedAuthToStore -> registerAuthFromFile -> reloadAuthFile`（`internal/api/handlers/management/auth_files.go`）。
+- 批量仅覆盖 `excluded_models` 字段，且是逐文件更新与逐文件 reload（`PatchAuthFilesExcludedModelsBatch`）。
+- 删除链路: `DeleteAuthFile` 会删除文件 + 删除 token store 记录，并将对应 auth 禁用（`internal/api/handlers/management/auth_files.go`）。
+- 401 处理: `sdk/cliproxy/auth/conductor.go` 对 401 直接禁用 auth/model；Kiro executor 401 会尝试 refresh 后重试（`internal/runtime/executor/kiro_executor.go`）；Codex refresh 出现 `refresh_token_reused` 会禁用（`internal/runtime/executor/codex_executor.go`）。
+- Codex 认证字段: access_token 与 account_id 会写入 Metadata；account_id 可由 jwt_parser 的 chatgpt_account_id 提取（`internal/auth/codex/jwt_parser.go`, `internal/runtime/executor/codex_executor.go`）。
+- Codex 冷却: 429 时会请求 `/backend-api/wham/usage`，头包含 `Authorization: Bearer <access_token>` 与 `Chatgpt-Account-Id: <account_id>`，解析 `rate_limit` / `code_review_rate_limit` 的 `reset_after_seconds` 或 `reset_at` 得出 `RetryAfter` 与窗口（`internal/runtime/executor/codex_executor.go`, `internal/runtime/executor/usage_helpers.go`）。
+- Codex 缺失 `access_token` 或 `account_id` 时不发 usage query，退化为错误体解析或退避（`internal/runtime/executor/codex_executor.go`）。
+- Gemini CLI 冷却: 429 时解析 `RetryInfo.retryDelay` / `ErrorInfo.metadata.quotaResetDelay`（`internal/runtime/executor/gemini_cli_executor.go`）。
+- Antigravity 冷却: 429 时同样调用 parseRetryDelay，解析 `RetryInfo.retryDelay` / `ErrorInfo.metadata.quotaResetDelay`（`internal/runtime/executor/antigravity_executor.go`）。
+- Qwen 冷却: quota 错误会映射为 429，并设置 `RetryAfter=北京时间次日 00:00`（`internal/runtime/executor/qwen_executor.go`）。
+- Gemini / Vertex / Gemini API executor 未检索到 retry-after 解析（`internal/runtime/executor/gemini_executor.go`, `internal/runtime/executor/gemini_vertex_executor.go`）。
+- Claude / GitHub Copilot / Kimi / Kilo / iFlow / AIStudio / OpenAICompat / Kiro executor 未检索到 retry-after 解析，默认走 conductor 指数退避。
+- 冷却/恢复机制: conductor 在 429 写入 `NextRetryAfter` 与 `Quota.NextRecoverAt`，selector 在时间到达后自动放行（`sdk/cliproxy/auth/conductor.go`, `sdk/cliproxy/auth/selector.go`）。
+- Gemini 虚拟凭证: `SynthesizeGeminiVirtualAuths` 生成 runtime-only 虚拟 auth，primary 被禁用，虚拟条目含 `gemini_virtual_parent` / `gemini_virtual_project`（`internal/watcher/synthesizer/file.go`），运行态结构在 `internal/runtime/geminicli/state.go`；当前未发现独立“删除虚拟凭证”接口。
+- 启动/运行主链路: `cmd/server/main.go` -> `internal/cmd/run.go` -> `sdk/cliproxy/service.go`（加载 auth、注册模型、启动 watcher/刷新）。
+- 启动热点 1: store Bootstrap/同步（Postgres/Object/Git）涉及网络与磁盘写入（`internal/store/*.go`）。
+- 启动热点 2: watcher 初次启动即全量扫描 authDir（`internal/watcher/events.go`, `internal/watcher/clients.go`）。
+- 启动热点 3: 模型列表拉取（`sdk/cliproxy/service.go` 内部 `registerModelsForAuth` 调用）。
+- 启动热点 4: 管理面静态资源自动更新（`internal/managementasset/updater.go`）。
+- 启动热点 5: Kiro 初始化与刷新（`internal/auth/kiro/*`）。
+- 启动热点 6: PG usage schema/cleanup 初始化（`internal/usage/*`）。
+- store 回灌: `PostReloadAuthFilesFromStore` 依赖 store 实现 `ReloadAuthFilesFromStore` 且需要 reload hook（`internal/api/handlers/management/reload_from_store.go`）。
+- 启动阶段重复扫描: watcher 的 `reloadClients` 与 `FileSynthesizer` 多次 Walk/Read/Parse authDir（`internal/watcher/clients.go`, `internal/watcher/synthesizer/file.go`）。
+- 已有测试: `auth_files_upload_test.go` 覆盖上传成功与持久化失败回滚场景。
+- 已读文档: `llmdoc/index.md`、`llmdoc/architecture/auth-system.md`。

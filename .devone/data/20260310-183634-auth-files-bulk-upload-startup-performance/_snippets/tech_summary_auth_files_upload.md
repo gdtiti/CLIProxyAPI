@@ -1,0 +1,3 @@
+﻿- 本轮改动: 管理端 UploadAuthFile 统一走持久化函数，增加校验->写盘->store 持久化->注册，失败回滚本地文件；新增上传辅助函数 uploadedAuthFilePath/validateUploadedAuthFile/persistUploadedAuthToStore/snapshotExistingAuthFile/restoreUploadedAuthFile。
+- 涉及文件/模块: internal/api/handlers/management/auth_files.go
+- 未改动但已核对: 无

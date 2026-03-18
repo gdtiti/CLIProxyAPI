@@ -1,0 +1,4 @@
+﻿- 技术约束: 现有单文件接口需保留；token store 可能不存在或不支持 reload；authDir 可能较大；Codex 精确冷却依赖 access_token + account_id（缺失时退化为错误体解析/退避）。
+- 业务约束: 需要保证认证文件的可追溯与失败可恢复。
+- 外部依赖: 具体部署规模、auth 文件数量、启动耗时基线。
+- 依赖差异: 部分 provider 无明确冷却字段，只能沿用 Retry-After（若上游提供）或 conductor 指数退避。
