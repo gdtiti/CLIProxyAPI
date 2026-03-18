@@ -128,6 +128,53 @@ func (NoopHook) OnAuthUpdated(context.Context, *Auth) {}
 // OnResult implements Hook.
 func (NoopHook) OnResult(context.Context, Result) {}
 
+type compositeHook struct {
+	hooks []Hook
+}
+
+func (h compositeHook) OnAuthRegistered(ctx context.Context, auth *Auth) {
+	for _, hook := range h.hooks {
+		if hook != nil {
+			hook.OnAuthRegistered(ctx, auth)
+		}
+	}
+}
+
+func (h compositeHook) OnAuthUpdated(ctx context.Context, auth *Auth) {
+	for _, hook := range h.hooks {
+		if hook != nil {
+			hook.OnAuthUpdated(ctx, auth)
+		}
+	}
+}
+
+func (h compositeHook) OnResult(ctx context.Context, result Result) {
+	for _, hook := range h.hooks {
+		if hook != nil {
+			hook.OnResult(ctx, result)
+		}
+	}
+}
+
+// CombineHooks merges multiple hooks into one, preserving call order.
+func CombineHooks(hooks ...Hook) Hook {
+	filtered := make([]Hook, 0, len(hooks))
+	for _, hook := range hooks {
+		if hook == nil {
+			continue
+		}
+		filtered = append(filtered, hook)
+	}
+	switch len(filtered) {
+	case 0:
+		return NoopHook{}
+	case 1:
+		return filtered[0]
+	default:
+		return compositeHook{hooks: filtered}
+	}
+}
+
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
 	store     Store
@@ -249,6 +296,25 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
+}
+
+// Hook returns the currently configured lifecycle hook.
+func (m *Manager) Hook() Hook {
+	if m == nil || m.hook == nil {
+		return NoopHook{}
+	}
+	return m.hook
+}
+
+// SetHook replaces the lifecycle hook used by the manager.
+func (m *Manager) SetHook(h Hook) {
+	if m == nil {
+		return
+	}
+	if h == nil {
+		h = NoopHook{}
+	}
+	m.hook = h
 }
 
 // SetStore swaps the underlying persistence store.
@@ -1616,6 +1682,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		now := time.Now()
 
 		if result.Success {
+			ClearUnauthorizedFailureHistory(auth)
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
 				resetModelState(state, now)
@@ -1650,13 +1717,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				}
 
 				statusCode := statusCodeFromResult(result.Error)
+				if statusCode != http.StatusUnauthorized {
+					ClearUnauthorizedFailureHistory(auth)
+				}
 				switch statusCode {
 				case 401:
-					auth.Disabled = true
-					auth.Status = StatusDisabled
-					state.Status = StatusDisabled
-					suspendReason = "unauthorized"
-					shouldSuspendModel = true
+					state.StatusMessage = "unauthorized"
+					state.NextRetryAfter = time.Time{}
 				case 402:
 					auth.Disabled = true
 					auth.Status = StatusDisabled
@@ -1986,6 +2053,9 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	}
 
 	statusCode := statusCodeFromResult(resultErr)
+	if statusCode != http.StatusUnauthorized {
+		ClearUnauthorizedFailureHistory(auth)
+	}
 
 	// 406 错误不触发 auth 冷却，因为通常是请求格式问题
 	if statusCode == http.StatusNotAcceptable {
@@ -2008,8 +2078,6 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
-		auth.Disabled = true
-		auth.Status = StatusDisabled
 	case 402:
 		auth.StatusMessage = "payment_required"
 		auth.Disabled = true
@@ -2431,6 +2499,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
+	SyncRuntimePersistence(auth, time.Now())
 	_, err := m.store.Save(ctx, auth)
 	return err
 }

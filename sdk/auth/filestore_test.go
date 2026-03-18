@@ -1,6 +1,12 @@
 package auth
 
-import "testing"
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestExtractAccessToken(t *testing.T) {
 	t.Parallel()
@@ -76,5 +82,55 @@ func TestExtractAccessToken(t *testing.T) {
 				t.Errorf("extractAccessToken() = %q, want %q", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestFileTokenStoreReadAuthFile_AppliesPersistedRuntimeState(t *testing.T) {
+	t.Parallel()
+
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "codex-auth.json")
+	nextRetry := time.Now().Add(2 * time.Hour).UTC().Round(0)
+	payload := map[string]any{
+		"type": "codex",
+		"cliproxy_runtime_state": map[string]any{
+			"auths": map[string]any{
+				"codex-auth.json": map[string]any{
+					"status":           "error",
+					"status_message":   "quota exhausted (weekly window)",
+					"next_retry_after": nextRetry.Format(time.RFC3339Nano),
+					"quota": map[string]any{
+						"exceeded":        true,
+						"reason":          "quota_weekly",
+						"next_recover_at": nextRetry.Format(time.RFC3339Nano),
+					},
+				},
+			},
+		},
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	store := NewFileTokenStore()
+	auth, err := store.readAuthFile(path, tempDir)
+	if err != nil {
+		t.Fatalf("readAuthFile() error = %v", err)
+	}
+	if auth == nil {
+		t.Fatal("readAuthFile() returned nil auth")
+	}
+	if !auth.NextRetryAfter.Equal(nextRetry) {
+		t.Fatalf("NextRetryAfter = %v, want %v", auth.NextRetryAfter, nextRetry)
+	}
+	if !auth.Quota.Exceeded {
+		t.Fatalf("Quota.Exceeded = false, want true")
+	}
+	if auth.Quota.Reason != "quota_weekly" {
+		t.Fatalf("Quota.Reason = %q, want %q", auth.Quota.Reason, "quota_weekly")
 	}
 }

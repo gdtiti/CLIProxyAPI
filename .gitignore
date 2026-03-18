@@ -28,6 +28,9 @@ copilot-messages.log
 # Binaries
 cli-proxy-api
 cliproxy
+!sdk/cliproxy/
+!sdk/cliproxy/auth/
+!sdk/cliproxy/auth/runtime_persistence.go
 *.exe
 
 

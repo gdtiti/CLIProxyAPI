@@ -260,6 +260,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: nextRefreshAfter,
 	}
+	cliproxyauth.ApplyPersistedRuntimeState(auth, time.Now())
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}

@@ -599,8 +599,12 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
-	if td.AccountID != "" {
-		auth.Metadata["account_id"] = td.AccountID
+	accountID := strings.TrimSpace(td.AccountID)
+	if accountID == "" {
+		accountID = codexauth.AccountIDFromIDToken(td.IDToken)
+	}
+	if accountID != "" {
+		auth.Metadata["account_id"] = accountID
 	}
 	auth.Metadata["email"] = td.Email
 	// Use unified key in files

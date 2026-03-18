@@ -56,6 +56,8 @@ type Handler struct {
 	postAuthHook        coreauth.PostAuthHook
 	reloadConfigHook    func() error
 	reloadAuthFilesHook func() error
+	authRuntimeHook     coreauth.Hook
+	hookedAuthManager   *coreauth.Manager
 }
 
 // NewHandler creates a new management handler instance.
@@ -73,6 +75,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
 	}
+	h.attachAuthManagerHook()
 	h.startAttemptCleanup()
 	return h
 }
@@ -116,7 +119,10 @@ func NewHandlerWithoutConfigFilePath(cfg *config.Config, manager *coreauth.Manag
 func (h *Handler) SetConfig(cfg *config.Config) { h.cfg = cfg }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
-func (h *Handler) SetAuthManager(manager *coreauth.Manager) { h.authManager = manager }
+func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
+	h.authManager = manager
+	h.attachAuthManagerHook()
+}
 
 // SetUsageStatistics allows replacing the usage statistics reference.
 func (h *Handler) SetUsageStatistics(stats *usage.RequestStatistics) { h.usageStats = stats }
@@ -149,6 +155,20 @@ func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 func (h *Handler) SetRuntimeReloadHooks(hooks RuntimeReloadHooks) {
 	h.reloadConfigHook = hooks.ReloadConfigFromDisk
 	h.reloadAuthFilesHook = hooks.ReloadAuthFilesFromDisk
+}
+
+func (h *Handler) attachAuthManagerHook() {
+	if h == nil || h.authManager == nil {
+		return
+	}
+	if h.authRuntimeHook == nil {
+		h.authRuntimeHook = newAuthRuntimeMaintenanceHook(h)
+	}
+	if h.hookedAuthManager == h.authManager {
+		return
+	}
+	h.authManager.SetHook(coreauth.CombineHooks(h.authManager.Hook(), h.authRuntimeHook))
+	h.hookedAuthManager = h.authManager
 }
 
 // Middleware enforces access control for management endpoints.
