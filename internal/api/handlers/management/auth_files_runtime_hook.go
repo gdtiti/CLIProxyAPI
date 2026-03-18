@@ -1,0 +1,252 @@
+package management
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	defaultUnauthorizedDeleteThreshold = 3
+	defaultUnauthorizedDeleteWindow    = 10 * time.Minute
+)
+
+type authRuntimeMaintenanceHook struct {
+	handler *Handler
+}
+
+func newAuthRuntimeMaintenanceHook(handler *Handler) *authRuntimeMaintenanceHook {
+	return &authRuntimeMaintenanceHook{handler: handler}
+}
+
+func (h *authRuntimeMaintenanceHook) OnAuthRegistered(context.Context, *coreauth.Auth) {}
+
+func (h *authRuntimeMaintenanceHook) OnAuthUpdated(context.Context, *coreauth.Auth) {}
+
+func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreauth.Result) {
+	if h == nil || h.handler == nil || result.Success || result.AuthID == "" {
+		return
+	}
+	if statusCode := unauthorizedCleanupStatusCode(result.Error); statusCode != 401 {
+		return
+	}
+
+	auth, ok := h.handler.authManager.GetByID(result.AuthID)
+	if !ok || auth == nil || !shouldTrackUnauthorizedCleanup(auth) {
+		return
+	}
+
+	now := time.Now()
+	count := coreauth.RecordUnauthorizedFailure(auth, now, h.handler.unauthorizedDeleteWindow())
+	if count < h.handler.unauthorizedDeleteThreshold() {
+		if _, err := h.handler.authManager.Update(ctx, auth); err != nil {
+			log.WithError(err).Warnf("management: persist unauthorized history failed for %s", auth.ID)
+		}
+		return
+	}
+
+	if err := h.handler.handleUnauthorizedAuthCleanup(ctx, auth); err != nil {
+		log.WithError(err).Warnf("management: unauthorized cleanup failed for %s", auth.ID)
+		if _, updateErr := h.handler.authManager.Update(ctx, auth); updateErr != nil {
+			log.WithError(updateErr).Warnf("management: persist unauthorized history after cleanup failure failed for %s", auth.ID)
+		}
+	}
+}
+
+func unauthorizedCleanupStatusCode(err *coreauth.Error) int {
+	if err == nil {
+		return 0
+	}
+	return err.HTTPStatus
+}
+
+func shouldTrackUnauthorizedCleanup(auth *coreauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.TrimSpace(authAttribute(auth, "gemini_virtual_project")) != "" {
+		return true
+	}
+	if strings.TrimSpace(authAttribute(auth, "path")) != "" {
+		return true
+	}
+	fileName := strings.TrimSpace(auth.FileName)
+	return strings.HasSuffix(strings.ToLower(fileName), ".json")
+}
+
+func (h *Handler) unauthorizedDeleteThreshold() int {
+	if h != nil && h.cfg != nil && h.cfg.AuthRuntime.UnauthorizedDeleteThreshold > 0 {
+		return h.cfg.AuthRuntime.UnauthorizedDeleteThreshold
+	}
+	return defaultUnauthorizedDeleteThreshold
+}
+
+func (h *Handler) unauthorizedDeleteWindow() time.Duration {
+	if h != nil && h.cfg != nil && h.cfg.AuthRuntime.UnauthorizedDeleteWindowSeconds > 0 {
+		return time.Duration(h.cfg.AuthRuntime.UnauthorizedDeleteWindowSeconds) * time.Second
+	}
+	return defaultUnauthorizedDeleteWindow
+}
+
+func (h *Handler) handleUnauthorizedAuthCleanup(ctx context.Context, auth *coreauth.Auth) error {
+	if auth == nil {
+		return fmt.Errorf("auth is nil")
+	}
+	if projectID := strings.TrimSpace(authAttribute(auth, "gemini_virtual_project")); projectID != "" {
+		return h.removeGeminiVirtualAuth(ctx, auth, projectID)
+	}
+	return h.removeManagedAuthFile(ctx, auth)
+}
+
+func (h *Handler) removeGeminiVirtualAuth(ctx context.Context, auth *coreauth.Auth, projectID string) error {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return h.removeManagedAuthFile(ctx, auth)
+	}
+
+	target := auth
+	if parentID := strings.TrimSpace(authAttribute(auth, "gemini_virtual_parent")); parentID != "" && h != nil && h.authManager != nil {
+		if parent, ok := h.authManager.GetByID(parentID); ok && parent != nil {
+			target = parent
+		}
+	}
+
+	path, metadata, err := h.loadAuthFileMetadata(target)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(path) == "" {
+		return h.removeManagedAuthFile(ctx, target)
+	}
+
+	projects := splitManagedGeminiProjectIDs(metadata["project_id"])
+	remaining := make([]string, 0, len(projects))
+	for _, candidate := range projects {
+		if candidate == projectID {
+			continue
+		}
+		remaining = append(remaining, candidate)
+	}
+	if len(remaining) == len(projects) {
+		return h.removeManagedAuthFile(ctx, target)
+	}
+	if len(remaining) == 0 {
+		return h.removeManagedAuthFile(ctx, target)
+	}
+
+	metadata["project_id"] = strings.Join(remaining, ",")
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshal updated gemini auth metadata: %w", err)
+	}
+	return h.writeValidatedAuthFile(ctx, path, raw, "Update auth")
+}
+
+func splitManagedGeminiProjectIDs(raw any) []string {
+	value, _ := raw.(string)
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	seen := make(map[string]struct{}, len(parts))
+	projects := make([]string, 0, len(parts))
+	for _, part := range parts {
+		projectID := strings.TrimSpace(part)
+		if projectID == "" {
+			continue
+		}
+		if _, exists := seen[projectID]; exists {
+			continue
+		}
+		seen[projectID] = struct{}{}
+		projects = append(projects, projectID)
+	}
+	return projects
+}
+
+func (h *Handler) removeManagedAuthFile(ctx context.Context, auth *coreauth.Auth) error {
+	if auth == nil {
+		return fmt.Errorf("auth is nil")
+	}
+	path := h.resolveManagedAuthPath(auth)
+	if path == "" {
+		h.disableAuth(ctx, auth.ID)
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove auth file: %w", err)
+	}
+	if err := h.deleteTokenRecord(ctx, path); err != nil {
+		return err
+	}
+	h.disableAuth(ctx, auth.ID)
+	return nil
+}
+
+func (h *Handler) resolveManagedAuthPath(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if path := strings.TrimSpace(authAttribute(auth, "path")); path != "" {
+		if filepath.IsAbs(path) {
+			return path
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			return abs
+		}
+		return path
+	}
+	fileName := strings.TrimSpace(auth.FileName)
+	if fileName == "" {
+		fileName = strings.TrimSpace(auth.ID)
+	}
+	if fileName == "" {
+		return ""
+	}
+	if filepath.IsAbs(fileName) {
+		return fileName
+	}
+	if h != nil && h.cfg != nil && strings.TrimSpace(h.cfg.AuthDir) != "" {
+		path := filepath.Join(h.cfg.AuthDir, fileName)
+		if abs, err := filepath.Abs(path); err == nil {
+			return abs
+		}
+		return path
+	}
+	return fileName
+}
+
+func (h *Handler) writeValidatedAuthFile(ctx context.Context, path string, data []byte, action string) error {
+	if err := h.validateUploadedAuthFile(path, data); err != nil {
+		return err
+	}
+	previous, hadPrevious, err := snapshotExistingAuthFile(path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("failed to prepare auth dir: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+	if err := h.persistAuthFileToStore(ctx, action, path); err != nil {
+		if restoreErr := restoreUploadedAuthFile(path, previous, hadPrevious); restoreErr != nil {
+			log.WithError(restoreErr).Warnf("failed to restore auth file after store persist error: %s", filepath.Base(path))
+		}
+		return err
+	}
+	if err := h.reloadAuthFile(ctx, path, data); err != nil {
+		return err
+	}
+	return nil
+}

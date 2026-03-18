@@ -783,6 +783,10 @@ func (h *Handler) validateUploadedAuthFile(path string, data []byte) error {
 }
 
 func (h *Handler) persistUploadedAuthToStore(ctx context.Context, path string) error {
+	return h.persistAuthFileToStore(ctx, "Upload auth", path)
+}
+
+func (h *Handler) persistAuthFileToStore(ctx context.Context, action, path string) error {
 	store := h.tokenStoreWithBaseDir()
 	if store == nil {
 		return fmt.Errorf("token store unavailable")
@@ -791,7 +795,11 @@ func (h *Handler) persistUploadedAuthToStore(ctx context.Context, path string) e
 	if !ok {
 		return nil
 	}
-	if err := persister.PersistAuthFiles(ctx, fmt.Sprintf("Upload auth %s", filepath.Base(path)), path); err != nil {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "Update auth"
+	}
+	if err := persister.PersistAuthFiles(ctx, fmt.Sprintf("%s %s", action, filepath.Base(path)), path); err != nil {
 		return fmt.Errorf("failed to persist auth file to store: %w", err)
 	}
 	return nil

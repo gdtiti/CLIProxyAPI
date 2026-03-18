@@ -194,6 +194,117 @@ func TestFileSynthesizer_Synthesize_CodexAccountIDFromIDToken(t *testing.T) {
 	}
 }
 
+func TestFileSynthesizer_Synthesize_AppliesPersistedRuntimeState(t *testing.T) {
+	tempDir := t.TempDir()
+	nextRetry := time.Now().Add(90 * time.Minute).UTC().Round(0)
+
+	authData := map[string]any{
+		"type": "codex",
+		"cliproxy_runtime_state": map[string]any{
+			"auths": map[string]any{
+				"codex-auth.json": map[string]any{
+					"status":           "error",
+					"status_message":   "quota exhausted (weekly window)",
+					"next_retry_after": nextRetry.Format(time.RFC3339Nano),
+					"quota": map[string]any{
+						"exceeded":        true,
+						"reason":          "quota_weekly",
+						"next_recover_at": nextRetry.Format(time.RFC3339Nano),
+					},
+				},
+			},
+		},
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "codex-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth, got %d", len(auths))
+	}
+	if !auths[0].NextRetryAfter.Equal(nextRetry) {
+		t.Fatalf("NextRetryAfter = %v, want %v", auths[0].NextRetryAfter, nextRetry)
+	}
+	if auths[0].Quota.Reason != "quota_weekly" {
+		t.Fatalf("Quota.Reason = %q, want %q", auths[0].Quota.Reason, "quota_weekly")
+	}
+}
+
+func TestFileSynthesizer_Synthesize_GeminiVirtualsApplyPersistedRuntimeState(t *testing.T) {
+	tempDir := t.TempDir()
+	nextRetry := time.Now().Add(45 * time.Minute).UTC().Round(0)
+	virtualID := buildGeminiVirtualID("gemini-auth.json", "project-a")
+
+	authData := map[string]any{
+		"type":       "gemini",
+		"email":      "gemini@example.com",
+		"project_id": "project-a,project-b",
+		"cliproxy_runtime_state": map[string]any{
+			"auths": map[string]any{
+				virtualID: map[string]any{
+					"status":           "error",
+					"status_message":   "quota exhausted (5h window)",
+					"next_retry_after": nextRetry.Format(time.RFC3339Nano),
+					"quota": map[string]any{
+						"exceeded":        true,
+						"reason":          "quota_5h",
+						"next_recover_at": nextRetry.Format(time.RFC3339Nano),
+					},
+				},
+			},
+		},
+	}
+	data, _ := json.Marshal(authData)
+	if err := os.WriteFile(filepath.Join(tempDir, "gemini-auth.json"), data, 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 3 {
+		t.Fatalf("expected 3 auths, got %d", len(auths))
+	}
+	var restored *coreauth.Auth
+	for _, auth := range auths {
+		if auth != nil && auth.ID == virtualID {
+			restored = auth
+			break
+		}
+	}
+	if restored == nil {
+		t.Fatalf("expected virtual auth %q to exist", virtualID)
+	}
+	if !restored.NextRetryAfter.Equal(nextRetry) {
+		t.Fatalf("NextRetryAfter = %v, want %v", restored.NextRetryAfter, nextRetry)
+	}
+	if restored.Quota.Reason != "quota_5h" {
+		t.Fatalf("Quota.Reason = %q, want %q", restored.Quota.Reason, "quota_5h")
+	}
+}
+
 func TestFileSynthesizer_Synthesize_SkipsInvalidFiles(t *testing.T) {
 	tempDir := t.TempDir()
 

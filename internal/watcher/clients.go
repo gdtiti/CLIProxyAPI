@@ -62,55 +62,13 @@ func (w *Watcher) reloadClients(rescanAuth bool, affectedOAuthProviders []string
 
 	var authFileCount int
 	if rescanAuth {
-		authFileCount = w.loadFileClients(cfg)
+		authFileCount = w.rebuildFileAuthCaches(cfg)
 		log.Debugf("loaded %d file-based clients", authFileCount)
 	} else {
 		w.clientsMutex.RLock()
 		authFileCount = len(w.lastAuthHashes)
 		w.clientsMutex.RUnlock()
 		log.Debugf("skipping auth directory rescan; retaining %d existing auth files", authFileCount)
-	}
-
-	if rescanAuth {
-		w.clientsMutex.Lock()
-
-		w.lastAuthHashes = make(map[string]string)
-		w.lastAuthContents = make(map[string]*coreauth.Auth)
-		w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
-		if resolvedAuthDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir); errResolveAuthDir != nil {
-			log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
-		} else if resolvedAuthDir != "" {
-			_ = filepath.Walk(resolvedAuthDir, func(path string, info fs.FileInfo, err error) error {
-				if err != nil {
-					return nil
-				}
-				if !info.IsDir() && strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
-					if data, errReadFile := os.ReadFile(path); errReadFile == nil && len(data) > 0 {
-						sum := sha256.Sum256(data)
-						normalizedPath := w.normalizeAuthPath(path)
-						w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
-						// Parse and cache auth content for future diff comparisons
-						var auth coreauth.Auth
-						if errParse := json.Unmarshal(data, &auth); errParse == nil {
-							w.lastAuthContents[normalizedPath] = &auth
-						}
-						ctx := &synthesizer.SynthesisContext{
-							Config:      cfg,
-							AuthDir:     resolvedAuthDir,
-							Now:         time.Now(),
-							IDGenerator: synthesizer.NewStableIDGenerator(),
-						}
-						if generated := synthesizer.SynthesizeAuthFile(ctx, path, data); len(generated) > 0 {
-							if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
-								w.fileAuthsByPath[normalizedPath] = pathAuths
-							}
-						}
-					}
-				}
-				return nil
-			})
-		}
-		w.clientsMutex.Unlock()
 	}
 
 	totalNewClients := authFileCount + geminiAPIKeyCount + vertexCompatAPIKeyCount + claudeAPIKeyCount + codexAPIKeyCount + openAICompatCount
@@ -271,6 +229,70 @@ func authSliceToMap(auths []*coreauth.Auth) map[string]*coreauth.Auth {
 		byID[a.ID] = a
 	}
 	return byID
+}
+
+func (w *Watcher) rebuildFileAuthCaches(cfg *config.Config) int {
+	if cfg == nil {
+		return 0
+	}
+
+	authDir, errResolveAuthDir := util.ResolveAuthDir(cfg.AuthDir)
+	if errResolveAuthDir != nil {
+		log.Errorf("failed to resolve auth directory for hash cache: %v", errResolveAuthDir)
+		return 0
+	}
+	if authDir == "" {
+		return 0
+	}
+
+	w.clientsMutex.Lock()
+	w.lastAuthHashes = make(map[string]string)
+	w.lastAuthContents = make(map[string]*coreauth.Auth)
+	w.fileAuthsByPath = make(map[string]map[string]*coreauth.Auth)
+	w.clientsMutex.Unlock()
+
+	authFileCount := 0
+	successfulAuthCount := 0
+	_ = filepath.Walk(authDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() || !strings.HasSuffix(strings.ToLower(info.Name()), ".json") {
+			return nil
+		}
+		authFileCount++
+		data, errReadFile := os.ReadFile(path)
+		if errReadFile != nil || len(data) == 0 {
+			return nil
+		}
+		successfulAuthCount++
+
+		sum := sha256.Sum256(data)
+		normalizedPath := w.normalizeAuthPath(path)
+		var parsedAuth coreauth.Auth
+		parsed := false
+		if errParse := json.Unmarshal(data, &parsedAuth); errParse == nil {
+			parsed = true
+		}
+		ctx := &synthesizer.SynthesisContext{
+			Config:      cfg,
+			AuthDir:     authDir,
+			Now:         time.Now(),
+			IDGenerator: synthesizer.NewStableIDGenerator(),
+		}
+		generated := synthesizer.SynthesizeAuthFile(ctx, path, data)
+
+		w.clientsMutex.Lock()
+		w.lastAuthHashes[normalizedPath] = hex.EncodeToString(sum[:])
+		if parsed {
+			w.lastAuthContents[normalizedPath] = &parsedAuth
+		}
+		if pathAuths := authSliceToMap(generated); len(pathAuths) > 0 {
+			w.fileAuthsByPath[normalizedPath] = pathAuths
+		}
+		w.clientsMutex.Unlock()
+		return nil
+	})
+
+	log.Debugf("auth directory scan complete - found %d .json files, %d readable", authFileCount, successfulAuthCount)
+	return authFileCount
 }
 
 func (w *Watcher) loadFileClients(cfg *config.Config) int {

@@ -78,6 +78,9 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
+	// AuthRuntime configures runtime auth cleanup and recovery behavior.
+	AuthRuntime AuthRuntimeConfig `yaml:"auth-runtime" json:"auth-runtime"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -213,6 +216,17 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+}
+
+// AuthRuntimeConfig configures runtime auth cleanup policies.
+type AuthRuntimeConfig struct {
+	// UnauthorizedDeleteThreshold controls how many consecutive 401 responses
+	// within the configured window will trigger auth cleanup. Defaults to 3.
+	UnauthorizedDeleteThreshold int `yaml:"unauthorized-delete-threshold" json:"unauthorized-delete-threshold"`
+
+	// UnauthorizedDeleteWindowSeconds controls the rolling window used for the
+	// consecutive 401 threshold. Defaults to 600 seconds (10 minutes).
+	UnauthorizedDeleteWindowSeconds int `yaml:"unauthorized-delete-window-seconds" json:"unauthorized-delete-window-seconds"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.

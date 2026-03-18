@@ -140,6 +140,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	coreauth.ApplyPersistedRuntimeState(a, now)
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -221,6 +222,9 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"virtual_parent_id": primary.ID,
 			"type":              metadata["type"],
 		}
+		if persisted, ok := metadata[coreauth.PersistedRuntimeStateMetadataKey]; ok {
+			metadataCopy[coreauth.PersistedRuntimeStateMetadataKey] = persisted
+		}
 		if v, ok := metadata["disable_cooling"]; ok {
 			metadataCopy["disable_cooling"] = v
 		} else if v, ok := metadata["disable-cooling"]; ok {
@@ -248,6 +252,7 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			UpdatedAt:  primary.UpdatedAt,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
 		}
+		coreauth.ApplyPersistedRuntimeState(virtual, now)
 		virtuals = append(virtuals, virtual)
 	}
 	return virtuals

@@ -1,6 +1,7 @@
 package management
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -190,5 +191,124 @@ func TestUploadAuthFileRaw_PersistFailureReturnsErrorAndRestoresFile(t *testing.
 	}
 	if string(raw) != `{"type":"codex","email":"old@example.com"}` {
 		t.Fatalf("restored auth file = %s, want original content", string(raw))
+	}
+}
+
+func TestUploadAuthFilesBatchMultipart_PersistsAllFiles(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	store := &uploadPersistStore{}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	parts := map[string]string{
+		"codex-a.json": `{"type":"codex","email":"a@example.com"}`,
+		"codex-b.json": `{"type":"codex","email":"b@example.com"}`,
+	}
+	for name, payload := range parts {
+		part, err := writer.CreateFormFile("files", name)
+		if err != nil {
+			t.Fatalf("create form file %s: %v", name, err)
+		}
+		if _, err := part.Write([]byte(payload)); err != nil {
+			t.Fatalf("write form file %s: %v", name, err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/batch", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+
+	h.UploadAuthFilesBatch(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("UploadAuthFilesBatch status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if store.persistCalls != 2 {
+		t.Fatalf("persist calls = %d, want 2", store.persistCalls)
+	}
+	for name := range parts {
+		if _, err := os.Stat(filepath.Join(authDir, name)); err != nil {
+			t.Fatalf("expected uploaded auth file %s: %v", name, err)
+		}
+	}
+	if len(manager.List()) != 2 {
+		t.Fatalf("manager auth count = %d, want 2", len(manager.List()))
+	}
+}
+
+func TestUploadAuthFilesBatchZip_ExpandsJsonEntries(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	store := &uploadPersistStore{}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	var zipBuffer bytes.Buffer
+	zipWriter := zip.NewWriter(&zipBuffer)
+	entries := map[string]string{
+		"nested/codex-a.json": `{"type":"codex","email":"a@example.com"}`,
+		"codex-b.json":        `{"type":"codex","email":"b@example.com"}`,
+	}
+	for name, payload := range entries {
+		entry, err := zipWriter.Create(name)
+		if err != nil {
+			t.Fatalf("create zip entry %s: %v", name, err)
+		}
+		if _, err := entry.Write([]byte(payload)); err != nil {
+			t.Fatalf("write zip entry %s: %v", name, err)
+		}
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "auths.zip")
+	if err != nil {
+		t.Fatalf("create zip form file: %v", err)
+	}
+	if _, err := part.Write(zipBuffer.Bytes()); err != nil {
+		t.Fatalf("write zip payload: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files/batch", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+
+	h.UploadAuthFilesBatch(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("UploadAuthFilesBatch status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if store.persistCalls != 2 {
+		t.Fatalf("persist calls = %d, want 2", store.persistCalls)
+	}
+	for _, name := range []string{"codex-a.json", "codex-b.json"} {
+		if _, err := os.Stat(filepath.Join(authDir, name)); err != nil {
+			t.Fatalf("expected uploaded auth file %s: %v", name, err)
+		}
+	}
+	if len(manager.List()) != 2 {
+		t.Fatalf("manager auth count = %d, want 2", len(manager.List()))
 	}
 }

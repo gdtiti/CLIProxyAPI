@@ -100,3 +100,48 @@ func TestManagerExecute_CodexQuotaWindowPropagatesToAuthState(t *testing.T) {
 		t.Fatalf("global quota reason = %q, want %q", globalState.Quota.Reason, "quota_weekly")
 	}
 }
+
+func TestManagerExecute_CodexUnauthorizedDoesNotImmediatelyDisableAuth(t *testing.T) {
+	t.Parallel()
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.RegisterExecutor(&testCodexQuotaExecutor{err: testQuotaStatusErr{
+		code: http.StatusUnauthorized,
+		msg:  "unauthorized",
+	}})
+
+	auth := &Auth{ID: "codex-auth-unauthorized", Provider: "codex"}
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, "codex", []*registry.ModelInfo{{ID: "gpt-5", Type: "codex"}})
+	defer reg.UnregisterClient(auth.ID)
+
+	_, err := mgr.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: "gpt-5", Payload: []byte(`{}`)}, cliproxyexecutor.Options{})
+	if err == nil {
+		t.Fatalf("Execute() error = nil, want non-nil")
+	}
+
+	updated, ok := mgr.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("GetByID() missing auth")
+	}
+	if updated.Disabled {
+		t.Fatalf("auth.Disabled = true, want false")
+	}
+	if updated.Status != StatusError {
+		t.Fatalf("auth.Status = %q, want %q", updated.Status, StatusError)
+	}
+	modelState := updated.ModelStates["gpt-5"]
+	if modelState == nil {
+		t.Fatalf("missing model state for gpt-5")
+	}
+	if modelState.Status != StatusError {
+		t.Fatalf("model state status = %q, want %q", modelState.Status, StatusError)
+	}
+	if modelState.StatusMessage != "unauthorized" {
+		t.Fatalf("model state status message = %q, want %q", modelState.StatusMessage, "unauthorized")
+	}
+}

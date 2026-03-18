@@ -92,6 +92,11 @@ quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
 
+# Runtime auth cleanup policy
+auth-runtime:
+  unauthorized-delete-threshold: 3 # Delete file-backed auth after N consecutive 401 responses
+  unauthorized-delete-window-seconds: 600 # Rolling time window for the consecutive 401 threshold
+
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: 'round-robin' # round-robin (default), fill-first
