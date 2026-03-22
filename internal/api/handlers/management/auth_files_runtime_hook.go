@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -33,6 +35,16 @@ func (h *authRuntimeMaintenanceHook) OnAuthUpdated(context.Context, *coreauth.Au
 
 func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreauth.Result) {
 	if h == nil || h.handler == nil || result.Success || result.AuthID == "" {
+		return
+	}
+	if shouldDisableCodexUsageLimitReached(result) {
+		auth, ok := h.handler.authManager.GetByID(result.AuthID)
+		if !ok || auth == nil || !shouldTrackUnauthorizedCleanup(auth) {
+			return
+		}
+		if err := h.handler.handleUsageLimitAuthDisable(ctx, auth); err != nil {
+			log.WithError(err).Warnf("management: usage limit cleanup failed for %s", auth.ID)
+		}
 		return
 	}
 	if statusCode := unauthorizedCleanupStatusCode(result.Error); statusCode != 401 {
@@ -66,6 +78,57 @@ func unauthorizedCleanupStatusCode(err *coreauth.Error) int {
 		return 0
 	}
 	return err.HTTPStatus
+}
+
+func shouldDisableCodexUsageLimitReached(result coreauth.Result) bool {
+	if result.Success || result.Error == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(result.Provider), "codex") {
+		return false
+	}
+	if result.Error.HTTPStatus != http.StatusTooManyRequests {
+		return false
+	}
+	return containsUsageLimitReached(result.Error.Message)
+}
+
+func containsUsageLimitReached(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	if strings.Contains(strings.ToLower(raw), "usage_limit_reached") {
+		return true
+	}
+	if !gjson.Valid(raw) {
+		return false
+	}
+	root := gjson.Parse(raw)
+	if isUsageLimitNode(root) {
+		return true
+	}
+	for _, key := range [...]string{"status_message", "message", "error.message"} {
+		nestedRaw := strings.TrimSpace(root.Get(key).String())
+		if nestedRaw == "" || !gjson.Valid(nestedRaw) {
+			continue
+		}
+		if isUsageLimitNode(gjson.Parse(nestedRaw)) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUsageLimitNode(node gjson.Result) bool {
+	if !node.Exists() {
+		return false
+	}
+	typeNode := strings.TrimSpace(node.Get("error.type").String())
+	if typeNode == "" {
+		typeNode = strings.TrimSpace(node.Get("type").String())
+	}
+	return strings.EqualFold(typeNode, "usage_limit_reached")
 }
 
 func shouldTrackUnauthorizedCleanup(auth *coreauth.Auth) bool {
@@ -104,6 +167,45 @@ func (h *Handler) handleUnauthorizedAuthCleanup(ctx context.Context, auth *corea
 		return h.removeGeminiVirtualAuth(ctx, auth, projectID)
 	}
 	return h.removeManagedAuthFile(ctx, auth)
+}
+
+func (h *Handler) handleUsageLimitAuthDisable(ctx context.Context, auth *coreauth.Auth) error {
+	if auth == nil {
+		return fmt.Errorf("auth is nil")
+	}
+	path := h.resolveManagedAuthPath(auth)
+	if path == "" {
+		h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+		return nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+			return nil
+		}
+		return fmt.Errorf("read auth file: %w", err)
+	}
+	if len(data) == 0 {
+		h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+		return nil
+	}
+
+	metadata := make(map[string]any)
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return fmt.Errorf("unmarshal auth file: %w", err)
+	}
+	metadata["disabled"] = true
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("marshal auth file: %w", err)
+	}
+	if err := h.writeValidatedAuthFile(ctx, path, raw, "Disable auth"); err != nil {
+		return err
+	}
+	h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+	return nil
 }
 
 func (h *Handler) removeGeminiVirtualAuth(ctx context.Context, auth *coreauth.Auth, projectID string) error {

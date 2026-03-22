@@ -136,6 +136,115 @@ func TestAuthRuntimeMaintenanceHook_RemovesOnlyGeminiVirtualProjectOnUnauthorize
 	}
 }
 
+func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnCodexUsageLimitReached(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthRuntime: config.AuthRuntimeConfig{
+			UnauthorizedDeleteThreshold:     3,
+			UnauthorizedDeleteWindowSeconds: 600,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"error":{"type":"usage_limit_reached","plan_type":"free","resets_in_seconds":60}}`,
+		},
+	})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read auth file after disable: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal disabled auth file: %v", err)
+	}
+	if disabled, _ := metadata["disabled"].(bool); !disabled {
+		t.Fatalf("expected auth file disabled=true, got %#v", metadata["disabled"])
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled after usage_limit_reached")
+	}
+	if updated.StatusMessage != "disabled after usage_limit_reached" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after usage_limit_reached")
+	}
+}
+
+func TestAuthRuntimeMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthRuntime: config.AuthRuntimeConfig{
+			UnauthorizedDeleteThreshold:     3,
+			UnauthorizedDeleteWindowSeconds: 600,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"detail":"Rate limit exceeded"}`,
+		},
+	})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read auth file after generic 429: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal auth file after generic 429: %v", err)
+	}
+	if disabled, _ := metadata["disabled"].(bool); disabled {
+		t.Fatalf("expected generic 429 not to disable auth file")
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to remain enabled after generic 429")
+	}
+}
+
 func managedGeminiVirtualID(baseID, projectID string) string {
 	project := strings.TrimSpace(projectID)
 	if project == "" {

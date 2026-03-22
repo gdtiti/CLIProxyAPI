@@ -1872,6 +1872,10 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 }
 
 func (h *Handler) disableAuth(ctx context.Context, id string) {
+	h.disableAuthWithMessage(ctx, id, "removed via management API")
+}
+
+func (h *Handler) disableAuthWithMessage(ctx context.Context, id, message string) {
 	if h == nil || h.authManager == nil {
 		return
 	}
@@ -1879,10 +1883,14 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 	if id == "" {
 		return
 	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "removed via management API"
+	}
 	if auth, ok := h.authManager.GetByID(id); ok {
 		auth.Disabled = true
 		auth.Status = coreauth.StatusDisabled
-		auth.StatusMessage = "removed via management API"
+		auth.StatusMessage = message
 		auth.UpdatedAt = time.Now()
 		_, _ = h.authManager.Update(ctx, auth)
 		return
@@ -1894,7 +1902,7 @@ func (h *Handler) disableAuth(ctx context.Context, id string) {
 	if auth, ok := h.authManager.GetByID(authID); ok {
 		auth.Disabled = true
 		auth.Status = coreauth.StatusDisabled
-		auth.StatusMessage = "removed via management API"
+		auth.StatusMessage = message
 		auth.UpdatedAt = time.Now()
 		_, _ = h.authManager.Update(ctx, auth)
 	}
