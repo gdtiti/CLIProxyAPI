@@ -37,12 +37,14 @@ type PostgresStoreConfig struct {
 // PostgresStore persists configuration and authentication metadata using PostgreSQL as backend
 // while mirroring data to a local workspace so existing file-based workflows continue to operate.
 type PostgresStore struct {
-	db         *sql.DB
-	cfg        PostgresStoreConfig
-	spoolRoot  string
-	configPath string
-	authDir    string
-	mu         sync.Mutex
+	db             *sql.DB
+	cfg            PostgresStoreConfig
+	spoolRoot      string
+	configPath     string
+	authDir        string
+	mu             sync.Mutex
+	notifierMu     sync.RWMutex
+	changeNotifier DistributedChangeNotifier
 }
 
 // NewPostgresStore establishes a connection to PostgreSQL and prepares the local workspace.
@@ -140,7 +142,7 @@ func (s *PostgresStore) EnsureSchema(ctx context.Context) error {
 	`, authTable)); err != nil {
 		return fmt.Errorf("postgres store: create auth table: %w", err)
 	}
-	return nil
+	return s.EnsureDistributedSchema(ctx)
 }
 
 // Bootstrap synchronizes configuration and auth records between PostgreSQL and the local workspace.
@@ -253,9 +255,11 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 	if err != nil {
 		return "", err
 	}
-	if err = s.upsertAuthRecord(ctx, relID, path); err != nil {
+	change, err := s.recordSingleAuthPathChange(ctx, relID, path, "save auth "+relID)
+	if err != nil {
 		return "", err
 	}
+	s.publishDistributedChange(change)
 	return path, nil
 }
 
@@ -339,17 +343,29 @@ func (s *PostgresStore) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	return s.deleteAuthRecord(ctx, relID)
+	change, err := s.deleteSingleAuthRecord(ctx, relID, "delete auth "+relID)
+	if err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
+	return nil
 }
 
 // PersistAuthFiles stores the provided auth file changes in PostgreSQL.
-func (s *PostgresStore) PersistAuthFiles(ctx context.Context, _ string, paths ...string) error {
+func (s *PostgresStore) PersistAuthFiles(ctx context.Context, message string, paths ...string) error {
 	if len(paths) == 0 {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+
+	var batch authBatchPayload
 	for _, p := range paths {
 		trimmed := strings.TrimSpace(p)
 		if trimmed == "" {
@@ -369,10 +385,42 @@ func (s *PostgresStore) PersistAuthFiles(ctx context.Context, _ string, paths ..
 			}
 			trimmed = abs
 		}
-		if err = s.syncAuthFile(ctx, relID, trimmed); err != nil {
+		changed, deleted, errSync := s.syncAuthFileTx(ctx, tx, relID, trimmed)
+		if errSync != nil {
+			return errSync
+		}
+		if !changed {
+			continue
+		}
+		if deleted {
+			batch.Deleted = append(batch.Deleted, relID)
+			continue
+		}
+		batch.Upserted = append(batch.Upserted, relID)
+	}
+
+	if len(batch.Upserted) == 0 && len(batch.Deleted) == 0 {
+		if err = commitTx(tx); err != nil {
 			return err
 		}
+		return nil
 	}
+
+	change, err := s.recordDistributedChangeTx(
+		ctx,
+		tx,
+		DistributedResourceAuth,
+		DistributedOperationSync,
+		message,
+		marshalDistributedPayload(batch),
+	)
+	if err != nil {
+		return err
+	}
+	if err = commitTx(tx); err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
 	return nil
 }
 
@@ -381,14 +429,63 @@ func (s *PostgresStore) PersistConfig(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+
+	var change *DistributedChange
 	data, err := os.ReadFile(s.configPath)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return s.deleteConfigRecord(ctx)
+			changed, errDelete := s.deleteConfigRecordTx(ctx, tx)
+			if errDelete != nil {
+				return errDelete
+			}
+			if changed {
+				change, err = s.recordDistributedChangeTx(
+					ctx,
+					tx,
+					DistributedResourceConfig,
+					DistributedOperationDelete,
+					"delete config",
+					marshalDistributedPayload(map[string]string{"id": defaultConfigKey}),
+				)
+				if err != nil {
+					return err
+				}
+			}
+			if err = commitTx(tx); err != nil {
+				return err
+			}
+			s.publishDistributedChange(change)
+			return nil
 		}
 		return fmt.Errorf("postgres store: read config file: %w", err)
 	}
-	return s.persistConfig(ctx, data)
+	changed, err := s.persistConfigTx(ctx, tx, data)
+	if err != nil {
+		return err
+	}
+	if changed {
+		change, err = s.recordDistributedChangeTx(
+			ctx,
+			tx,
+			DistributedResourceConfig,
+			DistributedOperationUpsert,
+			"persist config",
+			marshalDistributedPayload(map[string]string{"id": defaultConfigKey}),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if err = commitTx(tx); err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
+	return nil
 }
 
 // syncConfigFromDatabase writes the database-stored config to disk or seeds the database from template.
@@ -475,73 +572,310 @@ func (s *PostgresStore) syncAuthFromDatabase(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresStore) syncAuthFile(ctx context.Context, relID, path string) error {
+func (s *PostgresStore) recordSingleAuthPathChange(ctx context.Context, relID, path, message string) (*DistributedChange, error) {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rollbackTx(tx)
+
+	changed, _, err := s.syncAuthFileTx(ctx, tx, relID, path)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		if err = commitTx(tx); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	change, err := s.recordDistributedChangeTx(
+		ctx,
+		tx,
+		DistributedResourceAuth,
+		DistributedOperationSync,
+		message,
+		marshalDistributedPayload(authBatchPayload{Upserted: []string{relID}}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err = commitTx(tx); err != nil {
+		return nil, err
+	}
+	return change, nil
+}
+
+func (s *PostgresStore) deleteSingleAuthRecord(ctx context.Context, relID, message string) (*DistributedChange, error) {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer rollbackTx(tx)
+
+	changed, err := s.deleteAuthRecordTx(ctx, tx, relID)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		if err = commitTx(tx); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	change, err := s.recordDistributedChangeTx(
+		ctx,
+		tx,
+		DistributedResourceAuth,
+		DistributedOperationDelete,
+		message,
+		marshalDistributedPayload(authBatchPayload{Deleted: []string{relID}}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err = commitTx(tx); err != nil {
+		return nil, err
+	}
+	return change, nil
+}
+
+func (s *PostgresStore) syncAuthFileTx(ctx context.Context, tx *sql.Tx, relID, path string) (bool, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return s.deleteAuthRecord(ctx, relID)
+			changed, errDelete := s.deleteAuthRecordTx(ctx, tx, relID)
+			return changed, true, errDelete
 		}
-		return fmt.Errorf("postgres store: read auth file: %w", err)
+		return false, false, fmt.Errorf("postgres store: read auth file: %w", err)
 	}
 	if len(data) == 0 {
-		return s.deleteAuthRecord(ctx, relID)
+		changed, errDelete := s.deleteAuthRecordTx(ctx, tx, relID)
+		return changed, true, errDelete
 	}
-	return s.persistAuth(ctx, relID, data)
-}
 
-func (s *PostgresStore) upsertAuthRecord(ctx context.Context, relID, path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return fmt.Errorf("postgres store: read auth file: %w", err)
-	}
-	if len(data) == 0 {
-		return s.deleteAuthRecord(ctx, relID)
-	}
-	return s.persistAuth(ctx, relID, data)
+	changed, err := s.persistAuthTx(ctx, tx, relID, data)
+	return changed, false, err
 }
 
 func (s *PostgresStore) persistAuth(ctx context.Context, relID string, data []byte) error {
-	jsonPayload := json.RawMessage(data)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+
+	changed, err := s.persistAuthTx(ctx, tx, relID, data)
+	if err != nil {
+		return err
+	}
+	var change *DistributedChange
+	if changed {
+		change, err = s.recordDistributedChangeTx(
+			ctx,
+			tx,
+			DistributedResourceAuth,
+			DistributedOperationUpsert,
+			"persist auth "+relID,
+			marshalDistributedPayload(authBatchPayload{Upserted: []string{relID}}),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if err = commitTx(tx); err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
+	return nil
+}
+
+func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+
+	changed, err := s.deleteAuthRecordTx(ctx, tx, relID)
+	if err != nil {
+		return err
+	}
+	var change *DistributedChange
+	if changed {
+		change, err = s.recordDistributedChangeTx(
+			ctx,
+			tx,
+			DistributedResourceAuth,
+			DistributedOperationDelete,
+			"delete auth "+relID,
+			marshalDistributedPayload(authBatchPayload{Deleted: []string{relID}}),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if err = commitTx(tx); err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
+	return nil
+}
+
+func (s *PostgresStore) persistAuthTx(ctx context.Context, tx *sql.Tx, relID string, data []byte) (bool, error) {
+	querySelect := fmt.Sprintf("SELECT content::text FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+	existing, exists, err := loadTextRecordTx(ctx, tx, querySelect, relID)
+	if err != nil {
+		return false, fmt.Errorf("postgres store: load auth record: %w", err)
+	}
+
+	normalized := normalizeLineEndings(string(data))
+	if exists && normalizeLineEndings(existing) == normalized {
+		return false, nil
+	}
+
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		ON CONFLICT (id)
 		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
 	`, s.fullTableName(s.cfg.AuthTable))
-	if _, err := s.db.ExecContext(ctx, query, relID, jsonPayload); err != nil {
-		return fmt.Errorf("postgres store: upsert auth record: %w", err)
+	jsonPayload := json.RawMessage(data)
+	if _, err := tx.ExecContext(ctx, query, relID, jsonPayload); err != nil {
+		return false, fmt.Errorf("postgres store: upsert auth record: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
-func (s *PostgresStore) deleteAuthRecord(ctx context.Context, relID string) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
-	if _, err := s.db.ExecContext(ctx, query, relID); err != nil {
-		return fmt.Errorf("postgres store: delete auth record: %w", err)
+func (s *PostgresStore) deleteAuthRecordTx(ctx context.Context, tx *sql.Tx, relID string) (bool, error) {
+	querySelect := fmt.Sprintf("SELECT content::text FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+	if _, exists, err := loadTextRecordTx(ctx, tx, querySelect, relID); err != nil {
+		return false, fmt.Errorf("postgres store: inspect auth record: %w", err)
+	} else if !exists {
+		return false, nil
 	}
-	return nil
+
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.AuthTable))
+	if _, err := tx.ExecContext(ctx, query, relID); err != nil {
+		return false, fmt.Errorf("postgres store: delete auth record: %w", err)
+	}
+	return true, nil
 }
 
 func (s *PostgresStore) persistConfig(ctx context.Context, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+
+	changed, err := s.persistConfigTx(ctx, tx, data)
+	if err != nil {
+		return err
+	}
+	var change *DistributedChange
+	if changed {
+		change, err = s.recordDistributedChangeTx(
+			ctx,
+			tx,
+			DistributedResourceConfig,
+			DistributedOperationUpsert,
+			"persist config",
+			marshalDistributedPayload(map[string]string{"id": defaultConfigKey}),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if err = commitTx(tx); err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
+	return nil
+}
+
+func (s *PostgresStore) deleteConfigRecord(ctx context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer rollbackTx(tx)
+
+	changed, err := s.deleteConfigRecordTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	var change *DistributedChange
+	if changed {
+		change, err = s.recordDistributedChangeTx(
+			ctx,
+			tx,
+			DistributedResourceConfig,
+			DistributedOperationDelete,
+			"delete config",
+			marshalDistributedPayload(map[string]string{"id": defaultConfigKey}),
+		)
+		if err != nil {
+			return err
+		}
+	}
+	if err = commitTx(tx); err != nil {
+		return err
+	}
+	s.publishDistributedChange(change)
+	return nil
+}
+
+func (s *PostgresStore) persistConfigTx(ctx context.Context, tx *sql.Tx, data []byte) (bool, error) {
+	normalized := normalizeLineEndings(string(data))
+	querySelect := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	existing, exists, err := loadTextRecordTx(ctx, tx, querySelect, defaultConfigKey)
+	if err != nil {
+		return false, fmt.Errorf("postgres store: load config record: %w", err)
+	}
+	if exists && normalizeLineEndings(existing) == normalized {
+		return false, nil
+	}
+
 	query := fmt.Sprintf(`
 		INSERT INTO %s (id, content, created_at, updated_at)
 		VALUES ($1, $2, NOW(), NOW())
 		ON CONFLICT (id)
 		DO UPDATE SET content = EXCLUDED.content, updated_at = NOW()
 	`, s.fullTableName(s.cfg.ConfigTable))
-	normalized := normalizeLineEndings(string(data))
-	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey, normalized); err != nil {
-		return fmt.Errorf("postgres store: upsert config: %w", err)
+	if _, err := tx.ExecContext(ctx, query, defaultConfigKey, normalized); err != nil {
+		return false, fmt.Errorf("postgres store: upsert config: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
-func (s *PostgresStore) deleteConfigRecord(ctx context.Context) error {
-	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
-	if _, err := s.db.ExecContext(ctx, query, defaultConfigKey); err != nil {
-		return fmt.Errorf("postgres store: delete config: %w", err)
+func (s *PostgresStore) deleteConfigRecordTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+	querySelect := fmt.Sprintf("SELECT content FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	if _, exists, err := loadTextRecordTx(ctx, tx, querySelect, defaultConfigKey); err != nil {
+		return false, fmt.Errorf("postgres store: inspect config record: %w", err)
+	} else if !exists {
+		return false, nil
 	}
-	return nil
+
+	query := fmt.Sprintf("DELETE FROM %s WHERE id = $1", s.fullTableName(s.cfg.ConfigTable))
+	if _, err := tx.ExecContext(ctx, query, defaultConfigKey); err != nil {
+		return false, fmt.Errorf("postgres store: delete config: %w", err)
+	}
+	return true, nil
 }
 
 func (s *PostgresStore) resolveAuthPath(auth *cliproxyauth.Auth) (string, error) {

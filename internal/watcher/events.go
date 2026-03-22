@@ -40,11 +40,18 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	w.clientsMutex.Lock()
+	w.runCancel = cancel
+	w.clientsMutex.Unlock()
+
 	w.watchKiroIDETokenFile()
 
-	go w.processEvents(ctx)
+	go w.processEvents(runCtx)
 
 	w.reloadClients(true, nil, false)
+	w.syncConfigHashFromDisk()
+	w.startAutoReload(runCtx)
 	return nil
 }
 

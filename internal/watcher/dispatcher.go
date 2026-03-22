@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 
@@ -78,11 +79,7 @@ func (w *Watcher) dispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 }
 
 func (w *Watcher) refreshAuthState(force bool) {
-	w.clientsMutex.RLock()
-	cfg := w.config
-	authDir := w.authDir
-	w.clientsMutex.RUnlock()
-	auths := snapshotCoreAuthsFunc(cfg, authDir)
+	auths := w.snapshotCoreAuthsForRefresh()
 	w.clientsMutex.Lock()
 	if len(w.runtimeAuths) > 0 {
 		for _, a := range w.runtimeAuths {
@@ -94,6 +91,65 @@ func (w *Watcher) refreshAuthState(force bool) {
 	updates := w.prepareAuthUpdatesLocked(auths, force)
 	w.clientsMutex.Unlock()
 	w.dispatchAuthUpdates(updates)
+}
+
+func (w *Watcher) snapshotCoreAuthsForRefresh() []*coreauth.Auth {
+	w.clientsMutex.RLock()
+	cfg := w.config
+	authDir := w.authDir
+	cacheReady := w.fileAuthCacheReady
+	fileAuthsByPath := w.fileAuthsByPath
+	w.clientsMutex.RUnlock()
+
+	if !cacheReady {
+		return snapshotCoreAuthsFunc(cfg, authDir)
+	}
+
+	ctx := &synthesizer.SynthesisContext{
+		Config:      cfg,
+		AuthDir:     authDir,
+		Now:         time.Now(),
+		IDGenerator: synthesizer.NewStableIDGenerator(),
+	}
+
+	out := make([]*coreauth.Auth, 0)
+	configSynth := synthesizer.NewConfigSynthesizer()
+	if auths, err := configSynth.Synthesize(ctx); err == nil {
+		out = append(out, auths...)
+	}
+	out = append(out, cloneCachedFileAuths(fileAuthsByPath)...)
+	return out
+}
+
+func cloneCachedFileAuths(fileAuthsByPath map[string]map[string]*coreauth.Auth) []*coreauth.Auth {
+	if len(fileAuthsByPath) == 0 {
+		return nil
+	}
+
+	paths := make([]string, 0, len(fileAuthsByPath))
+	for path := range fileAuthsByPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+
+	out := make([]*coreauth.Auth, 0)
+	for _, path := range paths {
+		byID := fileAuthsByPath[path]
+		if len(byID) == 0 {
+			continue
+		}
+		ids := make([]string, 0, len(byID))
+		for id := range byID {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			if auth := byID[id]; auth != nil {
+				out = append(out, auth.Clone())
+			}
+		}
+	}
+	return out
 }
 
 func (w *Watcher) prepareAuthUpdatesLocked(auths []*coreauth.Auth, force bool) []AuthUpdate {

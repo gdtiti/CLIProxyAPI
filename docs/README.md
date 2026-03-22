@@ -18,6 +18,11 @@ This directory contains comprehensive documentation for the CLIProxyAPI Plus pro
 ### 🐳 Docker & CI/CD
 - **[Docker Branch Build Guide](DOCKER_BRANCH_BUILD.md)** - Using development branch images
 - **[GitHub Actions Setup](GITHUB_ACTIONS_SETUP.md)** - Configuring automated builds
+- **[Distributed Sync Two-Node Guide](distributed-sync-two-node-setup_CN.md)** - 双节点分布式联调手册
+- **[Distributed Sync Checklist](distributed-sync-checklist_CN.md)** - 联调检查清单与命令速查表
+- **[Distributed Sync Incident Matrix](distributed-sync-incident-matrix_CN.md)** - 联调异常场景判定表
+- **[Two-Node Docker Compose Template](docker-compose-distributed-sync-two-node.yaml)** - 同机双容器联调模板
+- **[Shared Distributed Config Sample](distributed-sync-config.shared.yaml)** - 双节点共享配置样例
 
 ### 📖 SDK Documentation
 - **[SDK Usage Guide](sdk-usage.md)** ([中文](sdk-usage_CN.md)) - Basic SDK integration
@@ -75,6 +80,13 @@ This directory contains comprehensive documentation for the CLIProxyAPI Plus pro
 1. Read [GitHub Actions Setup](GITHUB_ACTIONS_SETUP.md) for configuration
 2. Use [Docker Branch Build](DOCKER_BRANCH_BUILD.md) for usage
 3. Check [Complete Summary](COMPLETE_SUMMARY.md) for overview
+
+### "I want to run a two-node distributed sync lab on one machine"
+1. Start with [Distributed Sync Two-Node Guide](distributed-sync-two-node-setup_CN.md)
+2. Use [Distributed Sync Checklist](distributed-sync-checklist_CN.md) as the execution cheat sheet
+3. If something goes wrong, open [Distributed Sync Incident Matrix](distributed-sync-incident-matrix_CN.md)
+4. Copy [Shared Distributed Config Sample](distributed-sync-config.shared.yaml) to node A's bootstrap path
+5. Run [Two-Node Docker Compose Template](docker-compose-distributed-sync-two-node.yaml)
 
 ### "I want to develop locally"
 1. Follow [Development Scripts](DEV_SCRIPTS.md)

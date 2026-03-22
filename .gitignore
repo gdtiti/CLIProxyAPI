@@ -66,6 +66,12 @@ auths/*
 
 # Documentation
 docs/*
+!docs/README.md
+!docs/distributed-sync-two-node-setup_CN.md
+!docs/distributed-sync-checklist_CN.md
+!docs/distributed-sync-incident-matrix_CN.md
+!docs/docker-compose-distributed-sync-two-node.yaml
+!docs/distributed-sync-config.shared.yaml
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -90,3 +96,4 @@ _bmad-output/*
 ._*
 *.bak
 .project/attachments/files/**
+.ace-tool/

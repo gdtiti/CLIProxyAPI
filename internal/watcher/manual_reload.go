@@ -1,8 +1,6 @@
 package watcher
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 
@@ -23,12 +21,7 @@ func (w *Watcher) ReloadConfigNow() error {
 	if ok := w.reloadConfig(); !ok {
 		return fmt.Errorf("watcher: config reload failed")
 	}
-	if data, err := os.ReadFile(w.configPath); err == nil && len(data) > 0 {
-		sum := sha256.Sum256(data)
-		w.clientsMutex.Lock()
-		w.lastConfigHash = hex.EncodeToString(sum[:])
-		w.clientsMutex.Unlock()
-	}
+	w.syncConfigHashFromDisk()
 	return nil
 }
 

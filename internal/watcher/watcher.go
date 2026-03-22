@@ -30,35 +30,37 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath         string
+	authDir            string
+	config             *config.Config
+	clientsMutex       sync.RWMutex
+	configReloadMu     sync.Mutex
+	configReloadTimer  *time.Timer
+	serverUpdateMu     sync.Mutex
+	serverUpdateTimer  *time.Timer
+	serverUpdateLast   time.Time
+	serverUpdatePend   bool
+	runCancel          context.CancelFunc
+	stopped            atomic.Bool
+	reloadCallback     func(*config.Config)
+	watcher            *fsnotify.Watcher
+	lastAuthHashes     map[string]string
+	lastAuthContents   map[string]*coreauth.Auth
+	fileAuthsByPath    map[string]map[string]*coreauth.Auth
+	fileAuthCacheReady bool
+	lastRemoveTimes    map[string]time.Time
+	lastConfigHash     string
+	authQueue          chan<- AuthUpdate
+	currentAuths       map[string]*coreauth.Auth
+	runtimeAuths       map[string]*coreauth.Auth
+	dispatchMu         sync.Mutex
+	dispatchCond       *sync.Cond
+	pendingUpdates     map[string]AuthUpdate
+	pendingOrder       []string
+	dispatchCancel     context.CancelFunc
+	storePersister     storePersister
+	mirroredAuthDir    string
+	oldConfigYaml      []byte
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -124,6 +126,13 @@ func (w *Watcher) Start(ctx context.Context) error {
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
 	w.stopped.Store(true)
+	w.clientsMutex.Lock()
+	cancel := w.runCancel
+	w.runCancel = nil
+	w.clientsMutex.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()

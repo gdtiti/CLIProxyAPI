@@ -1,0 +1,30 @@
+host: "0.0.0.0"
+port: 8317
+
+remote-management:
+  # ????? Docker ????????????????????
+  allow-remote: true
+  secret-key: ""
+  disable-control-panel: false
+
+auth-dir: "./ignored-when-pgstore-enabled"
+
+debug: false
+logging-to-file: false
+usage-statistics-enabled: false
+
+distributed-sync:
+  enabled: true
+  node-id: ""
+  channel: "cliproxy:distributed-sync:events"
+  poll-interval-seconds: 15
+  redis:
+    addr: "redis:6379"
+    username: ""
+    password: ""
+    db: 0
+
+request-retry: 3
+force-model-prefix: false
+
+# ?????? provider?api-keys ????????

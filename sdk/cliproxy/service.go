@@ -14,8 +14,10 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/distributedsync"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	storepkg "github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -90,6 +92,12 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// distributedSync coordinates cross-node config/auth reloads.
+	distributedSync *distributedsync.Manager
+
+	// distributedNotifier publishes local store commits to Redis.
+	distributedNotifier *distributedsync.RedisNotifier
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -109,6 +117,59 @@ func (s *Service) GetWatcher() *WatcherWrapper {
 		return nil
 	}
 	return s.watcher
+}
+
+func (s *Service) setupDistributedSyncNotifier() {
+	if s == nil || s.cfg == nil || !s.cfg.DistributedSync.IsConfigured() {
+		return
+	}
+	pgStore, ok := sdkAuth.GetTokenStore().(*storepkg.PostgresStore)
+	if !ok || pgStore == nil {
+		return
+	}
+	notifier, err := distributedsync.NewRedisNotifier(
+		s.cfg.DistributedSync,
+		distributedsync.DefaultNodeID(s.cfg.Port),
+	)
+	if err != nil {
+		log.WithError(err).Warn("distributed sync: failed to initialize notifier")
+		return
+	}
+	if notifier == nil {
+		return
+	}
+	pgStore.SetDistributedChangeNotifier(notifier)
+	s.distributedNotifier = notifier
+}
+
+func (s *Service) startDistributedSync(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || s.cfg == nil || !s.cfg.DistributedSync.IsConfigured() || watcherWrapper == nil {
+		return
+	}
+	pgStore, ok := sdkAuth.GetTokenStore().(*storepkg.PostgresStore)
+	if !ok || pgStore == nil {
+		return
+	}
+
+	manager, err := distributedsync.NewManager(
+		s.cfg.DistributedSync,
+		distributedsync.DefaultNodeID(s.cfg.Port),
+		pgStore,
+		watcherWrapper,
+	)
+	if err != nil {
+		log.WithError(err).Warn("distributed sync: failed to initialize manager")
+		return
+	}
+	if manager == nil {
+		return
+	}
+	if err = manager.Start(ctx); err != nil {
+		log.WithError(err).Warn("distributed sync: failed to start manager")
+		return
+	}
+	s.distributedSync = manager
+	log.Info("distributed sync manager started")
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -515,6 +576,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	s.setupDistributedSyncNotifier()
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -723,6 +785,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	log.Info("file watcher started for config and auth directory changes")
 
+	s.startDistributedSync(ctx, watcherWrapper)
+
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
 		interval := 15 * time.Minute
@@ -765,6 +829,22 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.distributedSync != nil {
+			if err := s.distributedSync.Stop(); err != nil {
+				log.Errorf("failed to stop distributed sync manager: %v", err)
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
+		}
+		if s.distributedNotifier != nil {
+			if err := s.distributedNotifier.Close(); err != nil {
+				log.Errorf("failed to close distributed sync notifier: %v", err)
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

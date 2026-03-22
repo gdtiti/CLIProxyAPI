@@ -1,0 +1,91 @@
+# ????????????
+# ???
+# 1. ?? docs/distributed-sync-config.shared.yaml ???
+#    compose-data/node-a/pgstore/config/config.yaml
+# 2. ????
+#    docker compose -f docs/docker-compose-distributed-sync-two-node.yaml up -d --build
+
+name: cliproxy-distributed-sync-lab
+
+x-cliproxy-node-common: &cliproxy-node-common
+  build:
+    context: ..
+    dockerfile: Dockerfile
+    args:
+      VERSION: dev
+      COMMIT: compose-two-node
+      BUILD_DATE: "2026-03-18T00:00:00Z"
+  image: cliproxyapi-plus:distributed-sync-lab
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  environment:
+    TZ: Asia/Shanghai
+    PGSTORE_DSN: postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable
+    PGSTORE_SCHEMA: cliproxy_dist
+    MANAGEMENT_PASSWORD: dev-mgmt-key
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: cliproxy
+      POSTGRES_USER: cliproxy
+      POSTGRES_PASSWORD: cliproxy
+      TZ: Asia/Shanghai
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cliproxy -d cliproxy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  node-a:
+    <<: *cliproxy-node-common
+    hostname: cliproxy-node-a
+    environment:
+      TZ: Asia/Shanghai
+      PGSTORE_DSN: postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable
+      PGSTORE_SCHEMA: cliproxy_dist
+      PGSTORE_LOCAL_PATH: /data/node-a
+      MANAGEMENT_PASSWORD: dev-mgmt-key
+    ports:
+      - "18317:8317"
+    volumes:
+      - ../compose-data/node-a:/data/node-a
+
+  node-b:
+    <<: *cliproxy-node-common
+    hostname: cliproxy-node-b
+    environment:
+      TZ: Asia/Shanghai
+      PGSTORE_DSN: postgres://cliproxy:cliproxy@postgres:5432/cliproxy?sslmode=disable
+      PGSTORE_SCHEMA: cliproxy_dist
+      PGSTORE_LOCAL_PATH: /data/node-b
+      MANAGEMENT_PASSWORD: dev-mgmt-key
+    ports:
+      - "28317:8317"
+    volumes:
+      - ../compose-data/node-b:/data/node-b
+
+volumes:
+  postgres-data:

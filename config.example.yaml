@@ -30,6 +30,8 @@ remote-management:
 
 # Authentication directory (supports ~ for home directory)
 auth-dir: '~/.cli-proxy-api'
+# Environment override: CLIPROXY_AUTO_RELOAD_INTERVAL_SECONDS=<seconds>
+# Empty or <= 0 disables periodic auto reload of config/auth files.
 
 # API keys for authentication
 api-keys:
@@ -66,6 +68,19 @@ error-logs-max-files: 10
 
 # When false, disable in-memory usage statistics aggregation
 usage-statistics-enabled: false
+
+# Distributed config/auth sync for multi-node deployments.
+# Requires every node to share the same PostgreSQL store and Redis instance.
+distributed-sync:
+  enabled: false
+  node-id: ""
+  channel: "cliproxy:distributed-sync:events"
+  poll-interval-seconds: 30
+  redis:
+    addr: "127.0.0.1:6379"
+    username: ""
+    password: ""
+    db: 0
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.

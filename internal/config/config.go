@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -21,6 +23,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	EnvAutoReloadIntervalSeconds = "CLIPROXY_AUTO_RELOAD_INTERVAL_SECONDS"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -63,6 +66,13 @@ type Config struct {
 
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
+
+	// AutoReloadIntervalSeconds defines the watcher auto reload interval in seconds.
+	// It is currently intended to be controlled by environment override.
+	AutoReloadIntervalSeconds int `yaml:"-" json:"-"`
+
+	// DistributedSync configures cross-node config/auth synchronization.
+	DistributedSync DistributedSyncConfig `yaml:"distributed-sync" json:"distributed-sync"`
 
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
@@ -218,6 +228,67 @@ type RemoteManagement struct {
 	// PanelGitHubRepository overrides the GitHub repository used to fetch the management panel asset.
 	// Accepts either a repository URL (https://github.com/org/repo) or an API releases endpoint.
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
+}
+
+// DistributedSyncConfig configures cross-node config/auth synchronization.
+type DistributedSyncConfig struct {
+	// Enabled toggles the distributed sync manager and Redis event publishing.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// NodeID identifies the current node in Redis events. When empty, a runtime fallback is used.
+	NodeID string `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+
+	// Channel is the Redis Pub/Sub channel used for distributed sync events.
+	Channel string `yaml:"channel,omitempty" json:"channel,omitempty"`
+
+	// PollIntervalSeconds defines how often nodes reconcile PG versions when Redis events are missed.
+	PollIntervalSeconds int `yaml:"poll-interval-seconds,omitempty" json:"poll-interval-seconds,omitempty"`
+
+	// Redis holds the Redis connection configuration used for Pub/Sub.
+	Redis RedisSyncConfig `yaml:"redis" json:"redis"`
+}
+
+// RedisSyncConfig configures the Redis connection used by distributed sync.
+type RedisSyncConfig struct {
+	Addr     string `yaml:"addr,omitempty" json:"addr,omitempty"`
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+	DB       int    `yaml:"db,omitempty" json:"db,omitempty"`
+}
+
+const (
+	DefaultDistributedSyncChannel             = "cliproxy:distributed-sync:events"
+	DefaultDistributedSyncPollIntervalSeconds = 30
+)
+
+// IsConfigured returns true when distributed sync is enabled and Redis has a usable address.
+func (c DistributedSyncConfig) IsConfigured() bool {
+	return c.Enabled && strings.TrimSpace(c.Redis.Addr) != ""
+}
+
+// EffectiveChannel returns the configured Redis channel or the default channel.
+func (c DistributedSyncConfig) EffectiveChannel() string {
+	if channel := strings.TrimSpace(c.Channel); channel != "" {
+		return channel
+	}
+	return DefaultDistributedSyncChannel
+}
+
+// EffectivePollInterval returns the configured poll interval or the default value.
+func (c DistributedSyncConfig) EffectivePollInterval() time.Duration {
+	seconds := c.PollIntervalSeconds
+	if seconds <= 0 {
+		seconds = DefaultDistributedSyncPollIntervalSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// EffectiveNodeID returns the configured node ID or the provided fallback.
+func (c DistributedSyncConfig) EffectiveNodeID(fallback string) string {
+	if nodeID := strings.TrimSpace(c.NodeID); nodeID != "" {
+		return nodeID
+	}
+	return strings.TrimSpace(fallback)
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
@@ -673,7 +744,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	}
 
 	// Apply environment variable overrides
-	applyEnvironmentOverrides(&cfg)
+	if err = applyEnvironmentOverrides(&cfg); err != nil {
+		return nil, err
+	}
 
 	// NOTE: Startup legacy key migration is intentionally disabled.
 	// Reason: avoid mutating config.yaml during server startup.
@@ -779,8 +852,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	return &cfg, nil
 }
 
-// applyEnvironmentOverrides applies environment variable overrides to the configuration
-func applyEnvironmentOverrides(cfg *Config) {
+// applyEnvironmentOverrides applies environment variable overrides to the configuration.
+func applyEnvironmentOverrides(cfg *Config) error {
 	// Override Gemini CLI configuration from environment variables
 	if codeAssistEndpoint := os.Getenv("GEMINI_CODE_ASSIST_ENDPOINT"); codeAssistEndpoint != "" {
 		cfg.GeminiCLI.CodeAssistEndpoint = codeAssistEndpoint
@@ -805,6 +878,16 @@ func applyEnvironmentOverrides(cfg *Config) {
 	if secretKey := os.Getenv("REMOTE_MANAGEMENT_SECRET_KEY"); secretKey != "" {
 		cfg.RemoteManagement.SecretKey = secretKey
 	}
+
+	if autoReloadSeconds := strings.TrimSpace(os.Getenv(EnvAutoReloadIntervalSeconds)); autoReloadSeconds != "" {
+		seconds, err := strconv.Atoi(autoReloadSeconds)
+		if err != nil {
+			return fmt.Errorf("%s must be an integer: %w", EnvAutoReloadIntervalSeconds, err)
+		}
+		cfg.AutoReloadIntervalSeconds = seconds
+	}
+
+	return nil
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
