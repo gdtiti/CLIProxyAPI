@@ -474,7 +474,13 @@ func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, block
 	if auth == nil {
 		return true, blockReasonOther, time.Time{}
 	}
-	if auth.Disabled || auth.Status == StatusDisabled {
+	if auth.Disabled {
+		return true, blockReasonDisabled, time.Time{}
+	}
+	if next, active := temporaryDisableActive(auth, now); active {
+		return true, blockReasonCooldown, next
+	}
+	if auth.Status == StatusDisabled && !temporaryDisableExpired(auth, now) {
 		return true, blockReasonDisabled, time.Time{}
 	}
 	if model != "" {

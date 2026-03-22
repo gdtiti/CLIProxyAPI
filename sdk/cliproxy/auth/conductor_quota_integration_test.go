@@ -99,6 +99,34 @@ func TestManagerExecute_CodexQuotaWindowPropagatesToAuthState(t *testing.T) {
 	if globalState.Quota.Reason != "quota_weekly" {
 		t.Fatalf("global quota reason = %q, want %q", globalState.Quota.Reason, "quota_weekly")
 	}
+	if updated.Disabled {
+		t.Fatalf("auth.Disabled = true, want false")
+	}
+	if updated.Status != StatusDisabled {
+		t.Fatalf("auth.Status = %q, want %q", updated.Status, StatusDisabled)
+	}
+	if updated.StatusMessage != "quota exhausted (weekly window)" {
+		t.Fatalf("auth status message = %q, want %q", updated.StatusMessage, "quota exhausted (weekly window)")
+	}
+	if updated.NextRetryAfter.IsZero() {
+		t.Fatalf("auth.NextRetryAfter = zero, want non-zero")
+	}
+	if diff := updated.NextRetryAfter.Sub(time.Now().Add(codex429TemporaryDisableDuration)); diff < -5*time.Second || diff > 5*time.Second {
+		t.Fatalf("auth.NextRetryAfter = %v, want about now+%v", updated.NextRetryAfter, codex429TemporaryDisableDuration)
+	}
+	until := temporaryDisableUntil(updated)
+	if until.IsZero() {
+		t.Fatalf("temporary disable until = zero, want non-zero")
+	}
+	if diff := until.Sub(time.Now().Add(codex429TemporaryDisableDuration)); diff < -5*time.Second || diff > 5*time.Second {
+		t.Fatalf("temporary disable until = %v, want about now+%v", until, codex429TemporaryDisableDuration)
+	}
+	if modelState.NextRetryAfter.IsZero() {
+		t.Fatalf("model state next retry = zero, want non-zero")
+	}
+	if globalState.NextRetryAfter.IsZero() {
+		t.Fatalf("global state next retry = zero, want non-zero")
+	}
 }
 
 func TestManagerExecute_CodexUnauthorizedDoesNotImmediatelyDisableAuth(t *testing.T) {
@@ -143,5 +171,45 @@ func TestManagerExecute_CodexUnauthorizedDoesNotImmediatelyDisableAuth(t *testin
 	}
 	if modelState.StatusMessage != "unauthorized" {
 		t.Fatalf("model state status message = %q, want %q", modelState.StatusMessage, "unauthorized")
+	}
+}
+
+func TestManagerGetByID_ClearsExpiredTemporaryDisableFromSnapshot(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	expiredAt := now.Add(-1 * time.Minute)
+	mgr := NewManager(nil, nil, nil)
+	auth := &Auth{
+		ID:             "codex-auth-expired-temp-disable",
+		Provider:       "codex",
+		Status:         StatusDisabled,
+		StatusMessage:  "quota exhausted (5h window)",
+		Unavailable:    true,
+		NextRetryAfter: expiredAt,
+		Metadata: map[string]any{
+			temporaryDisableUntilMetadataKey:  expiredAt.UTC().Format(time.RFC3339Nano),
+			temporaryDisableReasonMetadataKey: temporaryDisableReasonCodex429,
+		},
+	}
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	updated, ok := mgr.GetByID(auth.ID)
+	if !ok || updated == nil {
+		t.Fatalf("GetByID() missing auth")
+	}
+	if updated.Status != StatusActive {
+		t.Fatalf("auth.Status = %q, want %q", updated.Status, StatusActive)
+	}
+	if updated.StatusMessage != "" {
+		t.Fatalf("auth.StatusMessage = %q, want empty", updated.StatusMessage)
+	}
+	if updated.Unavailable {
+		t.Fatalf("auth.Unavailable = true, want false")
+	}
+	if _, exists := updated.Metadata[temporaryDisableUntilMetadataKey]; exists {
+		t.Fatalf("temporary disable metadata still present after snapshot normalization")
 	}
 }

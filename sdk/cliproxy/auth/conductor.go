@@ -1743,9 +1743,13 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 					state.NextRetryAfter = time.Time{}
 					// 不设置 shouldSuspendModel，不触发冷却
 				case 429:
-					var next time.Time
+					next := time.Time{}
 					backoffLevel := state.Quota.BackoffLevel
-					if result.RetryAfter != nil {
+					if strings.EqualFold(strings.TrimSpace(result.Provider), "codex") {
+						next = now.Add(codex429TemporaryDisableDuration)
+						backoffLevel = 0
+						setTemporaryDisable(auth, next, temporaryDisableReasonCodex429, quotaStatusMessage(result.QuotaWindow))
+					} else if result.RetryAfter != nil {
 						next = now.Add(*result.RetryAfter)
 					} else {
 						cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
@@ -1798,7 +1802,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, result.QuotaWindow, now)
+				applyAuthFailureState(auth, result.Provider, result.Error, result.RetryAfter, result.QuotaWindow, now)
 			}
 		}
 
@@ -2047,7 +2051,7 @@ func isRequestInvalidError(err error) bool {
 	}
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, quotaWindow string, now time.Time) {
+func applyAuthFailureState(auth *Auth, provider string, resultErr *Error, retryAfter *time.Duration, quotaWindow string, now time.Time) {
 	if auth == nil {
 		return
 	}
@@ -2088,6 +2092,15 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		auth.StatusMessage = "not_found"
 		auth.NextRetryAfter = now.Add(12 * time.Hour)
 	case 429:
+		if strings.EqualFold(strings.TrimSpace(provider), "codex") {
+			next := now.Add(codex429TemporaryDisableDuration)
+			auth.Quota.Exceeded = true
+			auth.Quota.Reason = quotaReasonFromWindow(quotaWindow)
+			auth.Quota.NextRecoverAt = next
+			auth.Quota.BackoffLevel = 0
+			setTemporaryDisable(auth, next, temporaryDisableReasonCodex429, quotaStatusMessage(quotaWindow))
+			break
+		}
 		auth.StatusMessage = quotaStatusMessage(quotaWindow)
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = quotaReasonFromWindow(quotaWindow)
@@ -2167,8 +2180,11 @@ func (m *Manager) List() []*Auth {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	list := make([]*Auth, 0, len(m.auths))
+	now := time.Now()
 	for _, auth := range m.auths {
-		list = append(list, auth.Clone())
+		cloned := auth.Clone()
+		normalizeTemporaryDisableSnapshot(cloned, now)
+		list = append(list, cloned)
 	}
 	return list
 }
@@ -2185,7 +2201,9 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	if !ok {
 		return nil, false
 	}
-	return auth.Clone(), true
+	cloned := auth.Clone()
+	normalizeTemporaryDisableSnapshot(cloned, time.Now())
+	return cloned, true
 }
 
 // Executor returns the registered provider executor for a provider key.
@@ -2581,8 +2599,11 @@ func (m *Manager) snapshotAuths() []*Auth {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]*Auth, 0, len(m.auths))
+	now := time.Now()
 	for _, a := range m.auths {
-		out = append(out, a.Clone())
+		cloned := a.Clone()
+		normalizeTemporaryDisableSnapshot(cloned, now)
+		out = append(out, cloned)
 	}
 	return out
 }

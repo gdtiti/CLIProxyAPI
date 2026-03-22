@@ -311,6 +311,62 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_TemporaryDisableUsesCooldown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	until := now.Add(5 * time.Hour)
+	auth := &Auth{
+		ID:             "codex-temp-disabled",
+		Status:         StatusDisabled,
+		Unavailable:    true,
+		NextRetryAfter: until,
+		Metadata: map[string]any{
+			temporaryDisableUntilMetadataKey:  until.UTC().Format(time.RFC3339Nano),
+			temporaryDisableReasonMetadataKey: temporaryDisableReasonCodex429,
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.Equal(until.UTC()) {
+		t.Fatalf("next = %v, want %v", next, until.UTC())
+	}
+}
+
+func TestIsAuthBlockedForModel_ExpiredTemporaryDisableDoesNotBlock(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	until := now.Add(-1 * time.Minute)
+	auth := &Auth{
+		ID:             "codex-temp-disabled-expired",
+		Status:         StatusDisabled,
+		Unavailable:    true,
+		NextRetryAfter: until,
+		Metadata: map[string]any{
+			temporaryDisableUntilMetadataKey:  until.UTC().Format(time.RFC3339Nano),
+			temporaryDisableReasonMetadataKey: temporaryDisableReasonCodex429,
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", now)
+	if blocked {
+		t.Fatalf("blocked = true, want false")
+	}
+	if reason != blockReasonNone {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonNone)
+	}
+	if !next.IsZero() {
+		t.Fatalf("next = %v, want zero", next)
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 
