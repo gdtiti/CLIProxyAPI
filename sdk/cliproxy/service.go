@@ -98,6 +98,33 @@ type Service struct {
 
 	// distributedNotifier publishes local store commits to Redis.
 	distributedNotifier *distributedsync.RedisNotifier
+
+	// maintenanceCancel stops the auth maintenance worker.
+	maintenanceCancel context.CancelFunc
+
+	// maintenanceMu protects auth maintenance queue state.
+	maintenanceMu sync.Mutex
+
+	// maintenanceQueue stores pending auth maintenance actions in FIFO order.
+	maintenanceQueue []authMaintenanceCandidate
+
+	// maintenancePending deduplicates queued auth actions by candidate key.
+	maintenancePending map[string]struct{}
+
+	// maintenanceInFlight tracks auth actions currently being processed.
+	maintenanceInFlight map[string]struct{}
+
+	// maintenanceAuthIDsByPath caches auth ids by backing file path.
+	maintenanceAuthIDsByPath map[string]map[string]struct{}
+
+	// maintenanceAuthPathByID stores the reverse lookup for cache updates.
+	maintenanceAuthPathByID map[string]string
+
+	// maintenanceWake nudges the maintenance loop when new candidates arrive.
+	maintenanceWake chan struct{}
+
+	// maintenanceHookOnce ensures the auth maintenance hook is installed once.
+	maintenanceHookOnce sync.Once
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -392,23 +419,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
-	if s == nil || id == "" {
-		return
-	}
-	if s.coreManager == nil {
-		return
-	}
-	GlobalModelRegistry().UnregisterClient(id)
-	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
-		existing.Disabled = true
-		existing.Status = coreauth.StatusDisabled
-		if _, err := s.coreManager.Update(ctx, existing); err != nil {
-			log.Errorf("failed to disable auth %s: %v", id, err)
-		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
-			s.ensureExecutorsForAuth(existing)
-		}
-	}
+	s.applyCoreAuthRemovalWithReason(ctx, id, "", false)
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {
@@ -786,6 +797,7 @@ func (s *Service) Run(ctx context.Context) error {
 	log.Info("file watcher started for config and auth directory changes")
 
 	s.startDistributedSync(ctx, watcherWrapper)
+	s.startAuthMaintenance(ctx)
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
@@ -826,6 +838,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 
 		if s.watcherCancel != nil {
 			s.watcherCancel()
+		}
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
+			s.maintenanceCancel = nil
 		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()

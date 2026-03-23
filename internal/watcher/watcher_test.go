@@ -360,6 +360,37 @@ func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
 	w.clientsMutex.RUnlock()
 }
 
+func TestSuppressAuthPath_Expires(t *testing.T) {
+	w := &Watcher{}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	normalized := w.normalizeAuthPath(path)
+
+	w.SuppressAuthPath(path, 100*time.Millisecond)
+	if !w.isAuthPathSuppressed(normalized, time.Now()) {
+		t.Fatal("expected auth path to be suppressed immediately")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if w.isAuthPathSuppressed(normalized, time.Now()) {
+		t.Fatal("expected auth path suppression to expire")
+	}
+}
+
+func TestCancelPendingAuthWrite_RemovesScheduledEntry(t *testing.T) {
+	w := &Watcher{}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	normalized := w.normalizeAuthPath(path)
+
+	w.scheduleAuthWrite(normalized, path)
+	w.cancelPendingAuthWrite(normalized)
+
+	w.eventMu.Lock()
+	defer w.eventMu.Unlock()
+	if _, ok := w.pendingAuthWrites[normalized]; ok {
+		t.Fatal("expected pending auth write entry to be removed")
+	}
+}
+
 func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")

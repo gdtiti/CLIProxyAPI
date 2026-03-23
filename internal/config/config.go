@@ -91,6 +91,9 @@ type Config struct {
 	// AuthRuntime configures runtime auth cleanup and recovery behavior.
 	AuthRuntime AuthRuntimeConfig `yaml:"auth-runtime" json:"auth-runtime"`
 
+	// AuthMaintenance controls background auth maintenance for runtime auths.
+	AuthMaintenance AuthMaintenanceConfig `yaml:"auth-maintenance" json:"auth-maintenance"`
+
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
@@ -310,6 +313,32 @@ type AuthRuntimeConfig struct {
 	// UnauthorizedDeleteWindowSeconds controls the rolling window used for the
 	// consecutive 401 threshold. Defaults to 600 seconds (10 minutes).
 	UnauthorizedDeleteWindowSeconds int `yaml:"unauthorized-delete-window-seconds" json:"unauthorized-delete-window-seconds"`
+}
+
+// AuthMaintenanceConfig controls background maintenance for file-backed runtime auths.
+type AuthMaintenanceConfig struct {
+	// Enable toggles the background maintenance loop and runtime result hook.
+	Enable bool `yaml:"enable" json:"enable"`
+
+	// ScanIntervalSeconds controls how often runtime auths are scanned for queued actions.
+	ScanIntervalSeconds int `yaml:"scan-interval-seconds" json:"scan-interval-seconds"`
+
+	// DeleteIntervalSeconds controls the stagger interval between queued file mutations.
+	DeleteIntervalSeconds int `yaml:"delete-interval-seconds" json:"delete-interval-seconds"`
+
+	// DeleteStatusCodes defines immediate delete status codes for runtime auths.
+	// This is an opt-in extension beyond the existing 401 threshold behavior.
+	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
+
+	// DeleteQuotaExceeded enables delete candidates for auths with repeated quota exhaustion.
+	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
+
+	// QuotaStrikeThreshold is the minimum quota strike count required before delete is queued.
+	QuotaStrikeThreshold int `yaml:"quota-strike-threshold" json:"quota-strike-threshold"`
+
+	// DisableCodexUsageLimitReached keeps the existing project behavior:
+	// Codex usage_limit_reached disables the auth file instead of deleting it.
+	DisableCodexUsageLimitReached bool `yaml:"disable-codex-usage-limit-reached" json:"disable-codex-usage-limit-reached"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -732,6 +761,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
+	cfg.AuthMaintenance.Enable = true
+	cfg.AuthMaintenance.DisableCodexUsageLimitReached = true
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
