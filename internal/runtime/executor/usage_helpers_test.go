@@ -3,6 +3,8 @@ package executor
 import (
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -265,4 +267,20 @@ func TestParseCodexQuotaRetryDecision_WindowClassification(t *testing.T) {
 			t.Fatalf("RetryAfter = %v, want 475440s", *decision.RetryAfter)
 		}
 	})
+}
+
+func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
+	reporter := &usageReporter{
+		provider:    "openai",
+		model:       "gpt-5.4",
+		requestedAt: time.Now().Add(-1500 * time.Millisecond),
+	}
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.Latency < time.Second {
+		t.Fatalf("latency = %v, want >= 1s", record.Latency)
+	}
+	if record.Latency > 3*time.Second {
+		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
 }
