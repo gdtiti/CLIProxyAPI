@@ -345,6 +345,10 @@ type AuthMaintenanceConfig struct {
 	// DisableCodexUsageLimitReached keeps the existing project behavior:
 	// Codex usage_limit_reached disables the auth file instead of deleting it.
 	DisableCodexUsageLimitReached bool `yaml:"disable-codex-usage-limit-reached" json:"disable-codex-usage-limit-reached"`
+
+	// CodexMaxRequestCount deletes file-backed codex auth after N completed requests.
+	// Set to 0 to disable this cumulative request-count cleanup.
+	CodexMaxRequestCount int `yaml:"codex-max-request-count" json:"codex-max-request-count"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.

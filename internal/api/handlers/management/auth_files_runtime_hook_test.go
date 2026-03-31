@@ -65,6 +65,56 @@ func TestAuthRuntimeMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t 
 	}
 }
 
+func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterMaxRequestCount(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:               true,
+			CodexMaxRequestCount: 2,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	result := coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	}
+
+	manager.MarkResult(context.Background(), result)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("auth file removed too early after first request: %v", err)
+	}
+
+	manager.MarkResult(context.Background(), result)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected auth file to be removed after reaching max request count, stat err: %v", err)
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled after max request cleanup")
+	}
+	if updated.StatusMessage != "removed via management API" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "removed via management API")
+	}
+}
+
 func TestAuthRuntimeMaintenanceHook_RemovesOnlyGeminiVirtualProjectOnUnauthorizedThreshold(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "gemini-auth.json")
@@ -242,6 +292,49 @@ func TestAuthRuntimeMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *t
 	}
 	if updated.Disabled {
 		t.Fatalf("expected auth to remain enabled after generic 429")
+	}
+}
+
+func TestAuthRuntimeMaintenanceHook_DoesNotRemoveCodexAuthFileWhenMaxRequestCountDisabled(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:               true,
+			CodexMaxRequestCount: 0,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	result := coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	}
+	for i := 0; i < 3; i++ {
+		manager.MarkResult(context.Background(), result)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected auth file to remain when max request count disabled: %v", err)
+	}
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to remain enabled when max request count disabled")
 	}
 }
 

@@ -34,12 +34,21 @@ func (h *authRuntimeMaintenanceHook) OnAuthRegistered(context.Context, *coreauth
 func (h *authRuntimeMaintenanceHook) OnAuthUpdated(context.Context, *coreauth.Auth) {}
 
 func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreauth.Result) {
-	if h == nil || h.handler == nil || result.Success || result.AuthID == "" {
+	if h == nil || h.handler == nil || result.AuthID == "" {
+		return
+	}
+	auth, ok := h.handler.authManager.GetByID(result.AuthID)
+	if !ok || auth == nil {
+		return
+	}
+	if h.handler.trackCodexRequestCountCleanup(ctx, auth, result) {
+		return
+	}
+	if result.Success {
 		return
 	}
 	if shouldDisableCodexUsageLimitReached(result) {
-		auth, ok := h.handler.authManager.GetByID(result.AuthID)
-		if !ok || auth == nil || !shouldTrackUnauthorizedCleanup(auth) {
+		if !shouldTrackUnauthorizedCleanup(auth) {
 			return
 		}
 		if err := h.handler.handleUsageLimitAuthDisable(ctx, auth); err != nil {
@@ -51,8 +60,7 @@ func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreau
 		return
 	}
 
-	auth, ok := h.handler.authManager.GetByID(result.AuthID)
-	if !ok || auth == nil || !shouldTrackUnauthorizedCleanup(auth) {
+	if !shouldTrackUnauthorizedCleanup(auth) {
 		return
 	}
 
@@ -71,6 +79,33 @@ func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreau
 			log.WithError(updateErr).Warnf("management: persist unauthorized history after cleanup failure failed for %s", auth.ID)
 		}
 	}
+}
+
+func (h *Handler) trackCodexRequestCountCleanup(ctx context.Context, auth *coreauth.Auth, result coreauth.Result) bool {
+	limit := h.codexMaxRequestCount()
+	if limit <= 0 || auth == nil {
+		return false
+	}
+	if !shouldTrackCodexRequestCountCleanup(auth, result.Provider) {
+		return false
+	}
+
+	count := coreauth.RecordCompletedRequest(auth)
+	if count < limit {
+		if _, err := h.authManager.Update(ctx, auth); err != nil {
+			log.WithError(err).Warnf("management: persist codex request count failed for %s", auth.ID)
+		}
+		return false
+	}
+
+	if err := h.removeManagedAuthFile(ctx, auth); err != nil {
+		log.WithError(err).Warnf("management: codex request-count cleanup failed for %s", auth.ID)
+		if _, updateErr := h.authManager.Update(ctx, auth); updateErr != nil {
+			log.WithError(updateErr).Warnf("management: persist codex request count after cleanup failure failed for %s", auth.ID)
+		}
+		return false
+	}
+	return true
 }
 
 func unauthorizedCleanupStatusCode(err *coreauth.Error) int {
@@ -145,6 +180,20 @@ func shouldTrackUnauthorizedCleanup(auth *coreauth.Auth) bool {
 	return strings.HasSuffix(strings.ToLower(fileName), ".json")
 }
 
+func shouldTrackCodexRequestCountCleanup(auth *coreauth.Auth, provider string) bool {
+	if auth == nil {
+		return false
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = strings.ToLower(strings.TrimSpace(auth.Provider))
+	}
+	if provider != "codex" || auth.Disabled {
+		return false
+	}
+	return shouldTrackUnauthorizedCleanup(auth)
+}
+
 func (h *Handler) unauthorizedDeleteThreshold() int {
 	if h != nil && h.cfg != nil && h.cfg.AuthRuntime.UnauthorizedDeleteThreshold > 0 {
 		return h.cfg.AuthRuntime.UnauthorizedDeleteThreshold
@@ -157,6 +206,13 @@ func (h *Handler) unauthorizedDeleteWindow() time.Duration {
 		return time.Duration(h.cfg.AuthRuntime.UnauthorizedDeleteWindowSeconds) * time.Second
 	}
 	return defaultUnauthorizedDeleteWindow
+}
+
+func (h *Handler) codexMaxRequestCount() int {
+	if h != nil && h.cfg != nil && h.cfg.AuthMaintenance.CodexMaxRequestCount > 0 {
+		return h.cfg.AuthMaintenance.CodexMaxRequestCount
+	}
+	return 0
 }
 
 func (h *Handler) handleUnauthorizedAuthCleanup(ctx context.Context, auth *coreauth.Auth) error {

@@ -21,6 +21,7 @@ type persistedRuntimeState struct {
 }
 
 type persistedAuthRuntime struct {
+	RequestCount         int                            `json:"request_count,omitempty"`
 	UnauthorizedFailures []string                       `json:"unauthorized_failures,omitempty"`
 	Status               Status                         `json:"status,omitempty"`
 	StatusMessage        string                         `json:"status_message,omitempty"`
@@ -78,6 +79,20 @@ func RecordUnauthorizedFailure(auth *Auth, now time.Time, window time.Duration) 
 	state.setEntry(auth.ID, entry)
 	storePersistedRuntimeState(auth, state)
 	return len(entry.UnauthorizedFailures)
+}
+
+// RecordCompletedRequest increments the persisted cumulative completed-request count
+// for the auth and returns the updated total.
+func RecordCompletedRequest(auth *Auth) int {
+	if auth == nil {
+		return 0
+	}
+	state, _ := loadPersistedRuntimeState(auth.Metadata)
+	entry := state.entryFor(auth.ID)
+	entry.RequestCount++
+	state.setEntry(auth.ID, entry)
+	storePersistedRuntimeState(auth, state)
+	return entry.RequestCount
 }
 
 // ClearUnauthorizedFailureHistory removes persisted 401 timestamps for the auth.
@@ -332,7 +347,8 @@ func (s *persistedRuntimeState) setEntry(authID string, entry persistedAuthRunti
 }
 
 func (e persistedAuthRuntime) empty() bool {
-	return len(e.UnauthorizedFailures) == 0 &&
+	return e.RequestCount == 0 &&
+		len(e.UnauthorizedFailures) == 0 &&
 		e.Status == "" &&
 		strings.TrimSpace(e.StatusMessage) == "" &&
 		!e.Unavailable &&

@@ -170,6 +170,26 @@ func TestAuthMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t *testin
 	}
 }
 
+func TestSnapshotAuthMaintenanceConfig_PreservesCodexMaxRequestCount(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: "J:/tmp/auths",
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				CodexMaxRequestCount: 9,
+			},
+		},
+	}
+
+	maintenance, authDir := service.snapshotAuthMaintenanceConfig()
+
+	if maintenance.CodexMaxRequestCount != 9 {
+		t.Fatalf("CodexMaxRequestCount = %d, want 9", maintenance.CodexMaxRequestCount)
+	}
+	if authDir != "J:/tmp/auths" {
+		t.Fatalf("authDir = %q, want %q", authDir, "J:/tmp/auths")
+	}
+}
+
 func TestEnqueueAuthMaintenanceCandidate_RejectsInFlightDuplicate(t *testing.T) {
 	service := &Service{}
 	candidate := authMaintenanceCandidate{

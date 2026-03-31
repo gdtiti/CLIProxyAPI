@@ -24,6 +24,9 @@ func TestLoadConfigOptional_AuthMaintenanceDefaults(t *testing.T) {
 	if !cfg.AuthMaintenance.DisableCodexUsageLimitReached {
 		t.Fatalf("DisableCodexUsageLimitReached = false, want true")
 	}
+	if cfg.AuthMaintenance.CodexMaxRequestCount != 0 {
+		t.Fatalf("CodexMaxRequestCount = %d, want 0", cfg.AuthMaintenance.CodexMaxRequestCount)
+	}
 	if cfg.AuthMaintenance.ScanIntervalSeconds != 0 {
 		t.Fatalf("ScanIntervalSeconds = %d, want 0 before runtime normalization", cfg.AuthMaintenance.ScanIntervalSeconds)
 	}
@@ -32,7 +35,7 @@ func TestLoadConfigOptional_AuthMaintenanceDefaults(t *testing.T) {
 func TestLoadConfigOptional_AuthMaintenanceExplicitConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	data := []byte("auth-maintenance:\n  enable: false\n  scan-interval-seconds: 7\n  delete-interval-seconds: 3\n  delete-status-codes: [402, 429]\n  delete-quota-exceeded: true\n  quota-strike-threshold: 5\n  disable-codex-usage-limit-reached: false\n")
+	data := []byte("auth-maintenance:\n  enable: false\n  scan-interval-seconds: 7\n  delete-interval-seconds: 3\n  delete-status-codes: [402, 429]\n  delete-quota-exceeded: true\n  quota-strike-threshold: 5\n  disable-codex-usage-limit-reached: false\n  codex-max-request-count: 12\n")
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -62,5 +65,8 @@ func TestLoadConfigOptional_AuthMaintenanceExplicitConfig(t *testing.T) {
 	}
 	if cfg.AuthMaintenance.DisableCodexUsageLimitReached {
 		t.Fatalf("DisableCodexUsageLimitReached = true, want false")
+	}
+	if cfg.AuthMaintenance.CodexMaxRequestCount != 12 {
+		t.Fatalf("CodexMaxRequestCount = %d, want 12", cfg.AuthMaintenance.CodexMaxRequestCount)
 	}
 }

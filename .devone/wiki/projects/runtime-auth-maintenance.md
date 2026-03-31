@@ -31,6 +31,7 @@ auth-maintenance:
   delete-quota-exceeded: false
   quota-strike-threshold: 6
   disable-codex-usage-limit-reached: true
+  codex-max-request-count: 0
 ```
 
 ## 组合配置示例
@@ -39,6 +40,7 @@ auth-maintenance:
 
 - `401` 连续失败仍按原有阈值窗口删除。
 - `usage_limit_reached` 仍然只禁用，不删除。
+- 可以额外为 `codex` 文件 auth 配置累计请求次数上限；达到阈值后删除 auth 文件。
 - 多节点部署时继续复用此前已经落地的 `distributed-sync` 配置。
 
 ```yaml
@@ -54,6 +56,7 @@ auth-maintenance:
   delete-quota-exceeded: false
   quota-strike-threshold: 6
   disable-codex-usage-limit-reached: true
+  codex-max-request-count: 0
 
 distributed-sync:
   enabled: true
@@ -87,6 +90,9 @@ distributed-sync:
   - 当前项目使用 `Quota.BackoffLevel` 作为 strike 计数近似值。
 - `auth-maintenance.disable-codex-usage-limit-reached`
   - 当前项目默认 `true`，用于固定 “usage_limit_reached 只禁用” 的行为。
+- `auth-maintenance.codex-max-request-count`
+  - 控制单个文件型 `codex` auth 的累计已完成请求次数上限。
+  - `0` 表示关闭；`>0` 表示达到阈值后自动删除 auth 文件。
 
 ## 使用建议
 
@@ -104,6 +110,9 @@ distributed-sync:
 - 希望扩展某些确定不可恢复的错误码为立即删除时：
   - 在 `delete-status-codes` 中显式列出，例如 `402`、`404`
   - 不建议在没有充分验证前把 generic `429` 放进去
+- 希望一个 `codex` 文件 auth 用满固定次数后立即回收时：
+  - 设置 `codex-max-request-count: <正整数>`
+  - 当前实现按“累计所有已完成请求”计数，不区分成功和失败
 - 只想关闭后台运行态维护，但保留管理端现有逻辑时：
   - 设置 `auth-maintenance.enable: false`
 
