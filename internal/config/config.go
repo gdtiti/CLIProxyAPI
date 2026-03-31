@@ -353,6 +353,11 @@ type AuthMaintenanceConfig struct {
 	// CodexMaxRequestCount deletes file-backed codex auth after N completed requests.
 	// Set to 0 to disable this cumulative request-count cleanup.
 	CodexMaxRequestCount int `yaml:"codex-max-request-count" json:"codex-max-request-count"`
+
+	// CodexQuotaCheckRequestInterval probes the Codex usage API every N completed
+	// requests for file-backed auth; a 401 probe response removes the auth file.
+	// Set to 0 to disable this periodic quota probe.
+	CodexQuotaCheckRequestInterval int `yaml:"codex-quota-check-request-interval" json:"codex-quota-check-request-interval"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.

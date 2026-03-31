@@ -410,7 +410,8 @@ func isZeroAuthMaintenanceConfig(cfg config.AuthMaintenanceConfig) bool {
 		!cfg.DeleteQuotaExceeded &&
 		cfg.QuotaStrikeThreshold == 0 &&
 		!cfg.DisableCodexUsageLimitReached &&
-		cfg.CodexMaxRequestCount == 0
+		cfg.CodexMaxRequestCount == 0 &&
+		cfg.CodexQuotaCheckRequestInterval == 0
 }
 
 func (s *Service) authMaintenanceUnauthorizedThreshold() int {

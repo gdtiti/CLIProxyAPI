@@ -279,6 +279,26 @@ func TestSnapshotAuthMaintenanceConfig_PreservesCodexMaxRequestCount(t *testing.
 	}
 }
 
+func TestSnapshotAuthMaintenanceConfig_PreservesCodexQuotaCheckRequestInterval(t *testing.T) {
+	service := &Service{
+		cfg: &config.Config{
+			AuthDir: "J:/tmp/auths",
+			AuthMaintenance: config.AuthMaintenanceConfig{
+				CodexQuotaCheckRequestInterval: 6,
+			},
+		},
+	}
+
+	maintenance, authDir := service.snapshotAuthMaintenanceConfig()
+
+	if maintenance.CodexQuotaCheckRequestInterval != 6 {
+		t.Fatalf("CodexQuotaCheckRequestInterval = %d, want 6", maintenance.CodexQuotaCheckRequestInterval)
+	}
+	if authDir != "J:/tmp/auths" {
+		t.Fatalf("authDir = %q, want %q", authDir, "J:/tmp/auths")
+	}
+}
+
 func TestEnqueueAuthMaintenanceCandidate_RejectsInFlightDuplicate(t *testing.T) {
 	service := &Service{}
 	candidate := authMaintenanceCandidate{

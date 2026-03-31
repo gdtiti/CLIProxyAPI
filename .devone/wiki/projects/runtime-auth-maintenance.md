@@ -33,6 +33,7 @@ auth-maintenance:
   quota-strike-threshold: 6
   disable-codex-usage-limit-reached: true
   codex-max-request-count: 0
+  codex-quota-check-request-interval: 0
 ```
 
 ## 组合配置示例
@@ -60,6 +61,7 @@ auth-maintenance:
   quota-strike-threshold: 6
   disable-codex-usage-limit-reached: true
   codex-max-request-count: 0
+  codex-quota-check-request-interval: 0
 
 distributed-sync:
   enabled: true
@@ -100,6 +102,11 @@ distributed-sync:
 - `auth-maintenance.codex-max-request-count`
   - 控制单个文件型 `codex` auth 的累计已完成请求次数上限。
   - `0` 表示关闭；`>0` 表示达到阈值后自动删除 auth 文件。
+- `auth-maintenance.codex-quota-check-request-interval`
+  - 控制单个文件型 `codex` auth 每累计多少次已完成请求后，主动请求一次 Codex usage API。
+  - `0` 表示关闭；`>0` 表示命中间隔时触发 probe。
+  - 只有 probe 返回 `401` 时才删除 auth；非 `401` 或 probe 失败都不会触发删除。
+  - 若同时配置 `codex-max-request-count`，当前实现先判断累计次数删除；达到上限后不会再继续 probe。
 
 ## 使用建议
 
@@ -124,6 +131,10 @@ distributed-sync:
 - 希望一个 `codex` 文件 auth 用满固定次数后立即回收时：
   - 设置 `codex-max-request-count: <正整数>`
   - 当前实现按“累计所有已完成请求”计数，不区分成功和失败
+- 希望按固定间隔主动检查 `codex` 配额状态并在 `401` 时立刻回收时：
+  - 设置 `codex-quota-check-request-interval: <正整数>`
+  - 当前实现按“累计所有已完成请求”计数，到达间隔点时请求 `/backend-api/wham/usage`
+  - 只有该 probe 返回 `401` 才删除 auth；`200`、`429` 或请求失败都保留账号
 - 只想关闭后台运行态维护，但保留管理端现有逻辑时：
   - 设置 `auth-maintenance.enable: false`
 

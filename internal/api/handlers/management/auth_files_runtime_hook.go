@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -19,6 +20,8 @@ import (
 const (
 	defaultUnauthorizedDeleteThreshold = 3
 	defaultUnauthorizedDeleteWindow    = 10 * time.Minute
+	// Keep this probe UA aligned with the Codex executor.
+	managedCodexUsageProbeUserAgent = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 )
 
 type authRuntimeMaintenanceHook struct {
@@ -41,7 +44,7 @@ func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreau
 	if !ok || auth == nil {
 		return
 	}
-	if h.handler.trackCodexRequestCountCleanup(ctx, auth, result) {
+	if h.handler.handleCodexRequestMaintenance(ctx, auth, result) {
 		return
 	}
 	if result.Success {
@@ -90,9 +93,10 @@ func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreau
 	}
 }
 
-func (h *Handler) trackCodexRequestCountCleanup(ctx context.Context, auth *coreauth.Auth, result coreauth.Result) bool {
+func (h *Handler) handleCodexRequestMaintenance(ctx context.Context, auth *coreauth.Auth, result coreauth.Result) bool {
 	limit := h.codexMaxRequestCount()
-	if limit <= 0 || auth == nil {
+	quotaInterval := h.codexQuotaCheckRequestInterval()
+	if auth == nil || (limit <= 0 && quotaInterval <= 0) {
 		return false
 	}
 	if !shouldTrackCodexRequestCountCleanup(auth, result.Provider) {
@@ -100,21 +104,37 @@ func (h *Handler) trackCodexRequestCountCleanup(ctx context.Context, auth *corea
 	}
 
 	count := coreauth.RecordCompletedRequest(auth)
-	if count < limit {
-		if _, err := h.authManager.Update(ctx, auth); err != nil {
-			log.WithError(err).Warnf("management: persist codex request count failed for %s", auth.ID)
+	if limit > 0 && count >= limit {
+		if err := h.removeManagedAuthFile(ctx, auth); err != nil {
+			log.WithError(err).Warnf("management: codex request-count cleanup failed for %s", auth.ID)
+			if _, updateErr := h.authManager.Update(ctx, auth); updateErr != nil {
+				log.WithError(updateErr).Warnf("management: persist codex request count after cleanup failure failed for %s", auth.ID)
+			}
+			return false
 		}
-		return false
+		return true
 	}
 
-	if err := h.removeManagedAuthFile(ctx, auth); err != nil {
-		log.WithError(err).Warnf("management: codex request-count cleanup failed for %s", auth.ID)
-		if _, updateErr := h.authManager.Update(ctx, auth); updateErr != nil {
-			log.WithError(updateErr).Warnf("management: persist codex request count after cleanup failure failed for %s", auth.ID)
+	if quotaInterval > 0 && count%quotaInterval == 0 {
+		statusCode, err := h.probeManagedCodexUsageStatus(ctx, auth)
+		if err != nil {
+			log.WithError(err).Warnf("management: codex quota probe failed for %s", auth.ID)
+		} else if statusCode == http.StatusUnauthorized {
+			if err := h.removeManagedAuthFile(ctx, auth); err != nil {
+				log.WithError(err).Warnf("management: codex quota 401 cleanup failed for %s", auth.ID)
+				if _, updateErr := h.authManager.Update(ctx, auth); updateErr != nil {
+					log.WithError(updateErr).Warnf("management: persist codex request count after quota cleanup failure failed for %s", auth.ID)
+				}
+				return false
+			}
+			return true
 		}
-		return false
 	}
-	return true
+
+	if _, err := h.authManager.Update(ctx, auth); err != nil {
+		log.WithError(err).Warnf("management: persist codex request count failed for %s", auth.ID)
+	}
+	return false
 }
 
 func unauthorizedCleanupStatusCode(err *coreauth.Error) int {
@@ -222,6 +242,78 @@ func (h *Handler) codexMaxRequestCount() int {
 		return h.cfg.AuthMaintenance.CodexMaxRequestCount
 	}
 	return 0
+}
+
+func (h *Handler) codexQuotaCheckRequestInterval() int {
+	if h != nil && h.cfg != nil && h.cfg.AuthMaintenance.CodexQuotaCheckRequestInterval > 0 {
+		return h.cfg.AuthMaintenance.CodexQuotaCheckRequestInterval
+	}
+	return 0
+}
+
+func (h *Handler) probeManagedCodexUsageStatus(ctx context.Context, auth *coreauth.Auth) (int, error) {
+	if auth == nil {
+		return 0, nil
+	}
+	apiKey := strings.TrimSpace(authAttribute(auth, "api_key"))
+	if apiKey == "" {
+		apiKey = tokenValueFromMetadata(auth.Metadata)
+	}
+	accountID, _ := auth.Metadata["account_id"].(string)
+	accountID = strings.TrimSpace(accountID)
+	if apiKey == "" || accountID == "" {
+		return 0, nil
+	}
+
+	baseURL := strings.TrimSpace(authAttribute(auth, "base_url"))
+	if baseURL == "" && auth.Metadata != nil {
+		if value, ok := auth.Metadata["base_url"].(string); ok {
+			baseURL = strings.TrimSpace(value)
+		}
+	}
+
+	requestCtx := ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	probeCtx, cancel := context.WithTimeout(requestCtx, 6*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, managedCodexUsageURL(baseURL), nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", managedCodexUsageProbeUserAgent)
+	req.Header.Set("Chatgpt-Account-Id", accountID)
+
+	resp, err := executor.NewCodexExecutor(h.cfg).HttpRequest(probeCtx, auth, req)
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.WithError(errClose).Warn("management: close codex quota probe response body failed")
+		}
+	}()
+	return resp.StatusCode, nil
+}
+
+func managedCodexUsageURL(baseURL string) string {
+	const fallback = "https://chatgpt.com/backend-api/wham/usage"
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return fallback
+	}
+	parsed, err := http.NewRequest(http.MethodGet, baseURL, nil)
+	if err != nil || parsed.URL == nil || parsed.URL.Scheme == "" || parsed.URL.Host == "" {
+		return fallback
+	}
+	parsed.URL.Path = "/backend-api/wham/usage"
+	parsed.URL.RawQuery = ""
+	parsed.URL.Fragment = ""
+	return parsed.URL.String()
 }
 
 func (h *Handler) disableStatusCodeReason(result coreauth.Result) (string, bool) {

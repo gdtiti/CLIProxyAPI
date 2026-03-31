@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -109,6 +111,95 @@ func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterMaxRequestCount(t *
 	}
 	if !updated.Disabled {
 		t.Fatalf("expected auth to be disabled after max request cleanup")
+	}
+	if updated.StatusMessage != "removed via management API" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "removed via management API")
+	}
+}
+
+func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterQuotaProbeUnauthorized(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	var probeCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probeCalls.Add(1)
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q, want %q", got, "Bearer test-token")
+		}
+		if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct-1" {
+			t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "acct-1")
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                         true,
+			CodexQuotaCheckRequestInterval: 2,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID("codex-auth.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth to exist after reload")
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "test-token"
+	auth.Metadata["account_id"] = "acct-1"
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = server.URL + "/backend-api/codex"
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Update() error = %v", err)
+	}
+
+	result := coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	}
+
+	manager.MarkResult(context.Background(), result)
+	if got := probeCalls.Load(); got != 0 {
+		t.Fatalf("probeCalls after first request = %d, want 0", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("auth file removed too early after first request: %v", err)
+	}
+
+	manager.MarkResult(context.Background(), result)
+	if got := probeCalls.Load(); got != 1 {
+		t.Fatalf("probeCalls after second request = %d, want 1", got)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected auth file removed after quota probe 401, stat err: %v", err)
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled after quota probe cleanup")
 	}
 	if updated.StatusMessage != "removed via management API" {
 		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "removed via management API")
@@ -394,6 +485,78 @@ func TestAuthRuntimeMaintenanceHook_DoesNotRemoveCodexAuthFileWhenMaxRequestCoun
 	}
 	if updated.Disabled {
 		t.Fatalf("expected auth to remain enabled when max request count disabled")
+	}
+}
+
+func TestAuthRuntimeMaintenanceHook_DoesNotRemoveCodexAuthFileWhenQuotaProbeIsNotUnauthorized(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	var probeCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probeCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rate_limit":{"allowed":true}}`))
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                         true,
+			CodexQuotaCheckRequestInterval: 2,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID("codex-auth.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth to exist after reload")
+	}
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "test-token"
+	auth.Metadata["account_id"] = "acct-1"
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = server.URL + "/backend-api/codex"
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Update() error = %v", err)
+	}
+
+	result := coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	}
+
+	manager.MarkResult(context.Background(), result)
+	manager.MarkResult(context.Background(), result)
+
+	if got := probeCalls.Load(); got != 1 {
+		t.Fatalf("probeCalls after two requests = %d, want 1", got)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected auth file to remain after non-401 quota probe: %v", err)
+	}
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to remain enabled after non-401 quota probe")
 	}
 }
 
