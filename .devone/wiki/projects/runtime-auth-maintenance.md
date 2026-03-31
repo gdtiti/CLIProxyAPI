@@ -28,6 +28,7 @@ auth-maintenance:
   scan-interval-seconds: 30
   delete-interval-seconds: 5
   delete-status-codes: []
+  disable-status-codes: []
   delete-quota-exceeded: false
   quota-strike-threshold: 6
   disable-codex-usage-limit-reached: true
@@ -40,6 +41,7 @@ auth-maintenance:
 
 - `401` 连续失败仍按原有阈值窗口删除。
 - `usage_limit_reached` 仍然只禁用，不删除。
+- 可以为任意上游 HTTP 状态码配置“立即禁用”。
 - 可以额外为 `codex` 文件 auth 配置累计请求次数上限；达到阈值后删除 auth 文件。
 - 多节点部署时继续复用此前已经落地的 `distributed-sync` 配置。
 
@@ -53,6 +55,7 @@ auth-maintenance:
   scan-interval-seconds: 30
   delete-interval-seconds: 5
   delete-status-codes: []
+  disable-status-codes: []
   delete-quota-exceeded: false
   quota-strike-threshold: 6
   disable-codex-usage-limit-reached: true
@@ -84,6 +87,10 @@ distributed-sync:
 - `auth-maintenance.delete-status-codes`
   - 额外的立即删除状态码列表。
   - 默认空列表，避免把 generic `429` 误处理成删除。
+- `auth-maintenance.disable-status-codes`
+  - 额外的立即禁用状态码列表。
+  - 默认空列表；命中时会把 auth 文件写成 `disabled=true`，不删除文件。
+  - 若与 `delete-status-codes` 同时包含同一状态码，当前实现以 disable 优先。
 - `auth-maintenance.delete-quota-exceeded`
   - 打开后允许根据 quota/backoff 状态生成删除 candidate。
 - `auth-maintenance.quota-strike-threshold`
@@ -106,7 +113,11 @@ distributed-sync:
   - 确认本地节点文件变更后，其他节点能通过既有同步链路看到 reload 结果
 - 只想保留当前项目既有行为时：
   - 保持 `delete-status-codes: []`
+  - 保持 `disable-status-codes: []`
   - 保持 `disable-codex-usage-limit-reached: true`
+- 希望某些上游错误码直接禁用账号时：
+  - 在 `disable-status-codes` 中显式列出，例如 `429`、`403`
+  - 若同一状态码同时也在 `delete-status-codes` 中，当前实现会优先禁用，不会删除
 - 希望扩展某些确定不可恢复的错误码为立即删除时：
   - 在 `delete-status-codes` 中显式列出，例如 `402`、`404`
   - 不建议在没有充分验证前把 generic `429` 放进去

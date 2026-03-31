@@ -336,6 +336,10 @@ type AuthMaintenanceConfig struct {
 	// This is an opt-in extension beyond the existing 401 threshold behavior.
 	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
 
+	// DisableStatusCodes defines immediate disable status codes for runtime auths.
+	// When the same code appears in both disable and delete lists, disable wins.
+	DisableStatusCodes []int `yaml:"disable-status-codes" json:"disable-status-codes"`
+
 	// DeleteQuotaExceeded enables delete candidates for auths with repeated quota exhaustion.
 	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
 

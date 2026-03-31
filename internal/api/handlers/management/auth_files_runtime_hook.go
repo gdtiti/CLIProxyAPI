@@ -51,8 +51,17 @@ func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreau
 		if !shouldTrackUnauthorizedCleanup(auth) {
 			return
 		}
-		if err := h.handler.handleUsageLimitAuthDisable(ctx, auth); err != nil {
+		if err := h.handler.handleManagedAuthDisable(ctx, auth, "disabled after usage_limit_reached"); err != nil {
 			log.WithError(err).Warnf("management: usage limit cleanup failed for %s", auth.ID)
+		}
+		return
+	}
+	if reason, ok := h.handler.disableStatusCodeReason(result); ok {
+		if !shouldTrackUnauthorizedCleanup(auth) {
+			return
+		}
+		if err := h.handler.handleManagedAuthDisable(ctx, auth, reason); err != nil {
+			log.WithError(err).Warnf("management: configured status-code disable failed for %s", auth.ID)
 		}
 		return
 	}
@@ -215,6 +224,20 @@ func (h *Handler) codexMaxRequestCount() int {
 	return 0
 }
 
+func (h *Handler) disableStatusCodeReason(result coreauth.Result) (string, bool) {
+	if result.Success || result.Error == nil {
+		return "", false
+	}
+	if h == nil || h.cfg == nil {
+		return "", false
+	}
+	statusCode := unauthorizedCleanupStatusCode(result.Error)
+	if statusCode <= 0 || !containsManagedStatusCode(h.cfg.AuthMaintenance.DisableStatusCodes, statusCode) {
+		return "", false
+	}
+	return fmt.Sprintf("http_%d", statusCode), true
+}
+
 func (h *Handler) handleUnauthorizedAuthCleanup(ctx context.Context, auth *coreauth.Auth) error {
 	if auth == nil {
 		return fmt.Errorf("auth is nil")
@@ -225,26 +248,30 @@ func (h *Handler) handleUnauthorizedAuthCleanup(ctx context.Context, auth *corea
 	return h.removeManagedAuthFile(ctx, auth)
 }
 
-func (h *Handler) handleUsageLimitAuthDisable(ctx context.Context, auth *coreauth.Auth) error {
+func (h *Handler) handleManagedAuthDisable(ctx context.Context, auth *coreauth.Auth, reason string) error {
 	if auth == nil {
 		return fmt.Errorf("auth is nil")
 	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "disabled via management API"
+	}
 	path := h.resolveManagedAuthPath(auth)
 	if path == "" {
-		h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+		h.disableAuthWithMessage(ctx, auth.ID, reason)
 		return nil
 	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+			h.disableAuthWithMessage(ctx, auth.ID, reason)
 			return nil
 		}
 		return fmt.Errorf("read auth file: %w", err)
 	}
 	if len(data) == 0 {
-		h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+		h.disableAuthWithMessage(ctx, auth.ID, reason)
 		return nil
 	}
 
@@ -260,7 +287,7 @@ func (h *Handler) handleUsageLimitAuthDisable(ctx context.Context, auth *coreaut
 	if err := h.writeValidatedAuthFile(ctx, path, raw, "Disable auth"); err != nil {
 		return err
 	}
-	h.disableAuthWithMessage(ctx, auth.ID, "disabled after usage_limit_reached")
+	h.disableAuthWithMessage(ctx, auth.ID, reason)
 	return nil
 }
 
@@ -407,4 +434,16 @@ func (h *Handler) writeValidatedAuthFile(ctx context.Context, path string, data 
 		return err
 	}
 	return nil
+}
+
+func containsManagedStatusCode(codes []int, want int) bool {
+	if want == 0 {
+		return false
+	}
+	for _, code := range codes {
+		if code == want {
+			return true
+		}
+	}
+	return false
 }

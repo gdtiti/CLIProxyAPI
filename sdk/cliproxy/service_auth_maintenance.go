@@ -406,6 +406,7 @@ func isZeroAuthMaintenanceConfig(cfg config.AuthMaintenanceConfig) bool {
 		cfg.ScanIntervalSeconds == 0 &&
 		cfg.DeleteIntervalSeconds == 0 &&
 		len(cfg.DeleteStatusCodes) == 0 &&
+		len(cfg.DisableStatusCodes) == 0 &&
 		!cfg.DeleteQuotaExceeded &&
 		cfg.QuotaStrikeThreshold == 0 &&
 		!cfg.DisableCodexUsageLimitReached &&
@@ -445,6 +446,19 @@ func (s *Service) handleAuthMaintenanceResult(ctx context.Context, result coreau
 
 	if shouldDisableCodexUsageLimitReachedForMaintenance(result, cfg) {
 		candidate, ok := s.authMaintenanceCandidateForAuth(auth, authDir, "disabled after usage_limit_reached", authMaintenanceActionDisable)
+		if !ok {
+			return
+		}
+		if authMaintenancePendingAction(auth, authMaintenanceActionDisable) && s.authMaintenanceIsTracked(candidate.Key) {
+			return
+		}
+		s.markAuthMaintenanceCandidate(ctx, candidate, authID)
+		s.enqueueAuthMaintenanceCandidate(candidate)
+		return
+	}
+
+	if reason, ok := authEligibleForMaintenanceDisable(auth, &result, cfg); ok {
+		candidate, ok := s.authMaintenanceCandidateForAuth(auth, authDir, reason, authMaintenanceActionDisable)
 		if !ok {
 			return
 		}
@@ -580,6 +594,10 @@ func (s *Service) scanAuthMaintenanceCandidates(cfg config.AuthMaintenanceConfig
 				action = authMaintenanceActionDisable
 				reason = "disabled after usage_limit_reached"
 				hasReason = true
+			} else if disableReason, ok := authEligibleForMaintenanceDisable(auth, nil, cfg); ok {
+				action = authMaintenanceActionDisable
+				reason = disableReason
+				hasReason = true
 			} else if deleteReason, ok := authEligibleForMaintenanceDelete(auth, nil, cfg); ok {
 				action = authMaintenanceActionDelete
 				reason = deleteReason
@@ -639,7 +657,7 @@ func (s *Service) disableAuthMaintenanceCandidate(ctx context.Context, candidate
 	}
 	for _, id := range candidate.IDs {
 		if trimmed := strings.TrimSpace(id); trimmed != "" {
-			s.applyCoreAuthDisableWithReason(ctx, trimmed, "disabled after usage_limit_reached", false)
+			s.applyCoreAuthDisableWithReason(ctx, trimmed, maintenanceStatusMessage(candidate.Reason, "disabled via auth maintenance"), false)
 		}
 	}
 	return nil
@@ -1000,6 +1018,22 @@ func shouldDisableAuthAfterUsageLimitFromState(auth *coreauth.Auth, cfg config.A
 		return true
 	}
 	return containsUsageLimitReached(auth.StatusMessage)
+}
+
+func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Result, cfg config.AuthMaintenanceConfig) (string, bool) {
+	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
+		return "", false
+	}
+	if authMaintenancePendingAction(auth, authMaintenanceActionDisable) {
+		return authMaintenancePendingReason(auth)
+	}
+	if auth == nil {
+		return "", false
+	}
+	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && containsStatusCode(cfg.DisableStatusCodes, statusCode) {
+		return fmt.Sprintf("http_%d", statusCode), true
+	}
+	return "", false
 }
 
 func unauthorizedCleanupStatusCode(err *coreauth.Error) int {

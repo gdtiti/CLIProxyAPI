@@ -128,6 +128,95 @@ func TestAuthMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *testing.
 	}
 }
 
+func TestAuthMaintenanceHook_DisablesAuthFileOnConfiguredStatusCode(t *testing.T) {
+	service, manager, path, cleanup := newAuthMaintenanceTestService(t, config.Config{
+		AuthRuntime: config.AuthRuntimeConfig{
+			UnauthorizedDeleteThreshold:     2,
+			UnauthorizedDeleteWindowSeconds: 600,
+		},
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                true,
+			ScanIntervalSeconds:   1,
+			DeleteIntervalSeconds: 1,
+			DisableStatusCodes:    []int{http.StatusTooManyRequests},
+		},
+	})
+	defer cleanup()
+	_ = service
+
+	service.handleAuthMaintenanceResult(context.Background(), coreauth.Result{
+		AuthID:   filepath.Base(path),
+		Provider: "codex",
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"detail":"Rate limit exceeded"}`,
+		},
+	})
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var metadata map[string]any
+		if json.Unmarshal(raw, &metadata) != nil {
+			return false
+		}
+		updated, ok := manager.GetByID(filepath.Base(path))
+		return ok && updated != nil && updated.Disabled && metadata["disabled"] == true
+	})
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("configured disable should not remove auth file: %v", err)
+	}
+}
+
+func TestAuthMaintenanceHook_DisableStatusCodeWinsOverDeleteStatusCode(t *testing.T) {
+	service, manager, path, cleanup := newAuthMaintenanceTestService(t, config.Config{
+		AuthRuntime: config.AuthRuntimeConfig{
+			UnauthorizedDeleteThreshold:     2,
+			UnauthorizedDeleteWindowSeconds: 600,
+		},
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                true,
+			ScanIntervalSeconds:   1,
+			DeleteIntervalSeconds: 1,
+			DeleteStatusCodes:     []int{http.StatusTooManyRequests},
+			DisableStatusCodes:    []int{http.StatusTooManyRequests},
+		},
+	})
+	defer cleanup()
+	_ = service
+
+	service.handleAuthMaintenanceResult(context.Background(), coreauth.Result{
+		AuthID:   filepath.Base(path),
+		Provider: "codex",
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"detail":"Rate limit exceeded"}`,
+		},
+	})
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var metadata map[string]any
+		if json.Unmarshal(raw, &metadata) != nil {
+			return false
+		}
+		updated, ok := manager.GetByID(filepath.Base(path))
+		return ok && updated != nil && updated.Disabled && metadata["disabled"] == true
+	})
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("disable should win over delete for overlapping status codes: %v", err)
+	}
+}
+
 func TestAuthMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t *testing.T) {
 	service, manager, path, cleanup := newAuthMaintenanceTestService(t, config.Config{
 		AuthRuntime: config.AuthRuntimeConfig{

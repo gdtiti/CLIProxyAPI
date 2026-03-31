@@ -115,6 +115,7 @@ auth-runtime:
 
 # Runtime auth maintenance extensions.
 auth-maintenance:
+  disable-status-codes: [] # Disable a file-backed runtime auth on matching upstream HTTP status codes; disable wins if also listed in delete-status-codes.
   codex-max-request-count: 0 # Delete a file-backed codex auth after N completed requests; 0 disables.
 
 # Routing strategy for selecting credentials when multiple match.

@@ -295,6 +295,65 @@ func TestAuthRuntimeMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *t
 	}
 }
 
+func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnConfiguredStatusCode(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:             true,
+			DisableStatusCodes: []int{http.StatusTooManyRequests},
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"detail":"Rate limit exceeded"}`,
+		},
+	})
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read auth file after configured disable: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal auth file after configured disable: %v", err)
+	}
+	if disabled, _ := metadata["disabled"].(bool); !disabled {
+		t.Fatalf("expected configured status code to disable auth file")
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled after configured status code")
+	}
+	if updated.StatusMessage != "http_429" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "http_429")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("configured disable should not remove auth file: %v", err)
+	}
+}
+
 func TestAuthRuntimeMaintenanceHook_DoesNotRemoveCodexAuthFileWhenMaxRequestCountDisabled(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex-auth.json")

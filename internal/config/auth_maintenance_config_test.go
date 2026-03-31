@@ -24,6 +24,9 @@ func TestLoadConfigOptional_AuthMaintenanceDefaults(t *testing.T) {
 	if !cfg.AuthMaintenance.DisableCodexUsageLimitReached {
 		t.Fatalf("DisableCodexUsageLimitReached = false, want true")
 	}
+	if len(cfg.AuthMaintenance.DisableStatusCodes) != 0 {
+		t.Fatalf("DisableStatusCodes = %#v, want empty", cfg.AuthMaintenance.DisableStatusCodes)
+	}
 	if cfg.AuthMaintenance.CodexMaxRequestCount != 0 {
 		t.Fatalf("CodexMaxRequestCount = %d, want 0", cfg.AuthMaintenance.CodexMaxRequestCount)
 	}
@@ -35,7 +38,7 @@ func TestLoadConfigOptional_AuthMaintenanceDefaults(t *testing.T) {
 func TestLoadConfigOptional_AuthMaintenanceExplicitConfig(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	data := []byte("auth-maintenance:\n  enable: false\n  scan-interval-seconds: 7\n  delete-interval-seconds: 3\n  delete-status-codes: [402, 429]\n  delete-quota-exceeded: true\n  quota-strike-threshold: 5\n  disable-codex-usage-limit-reached: false\n  codex-max-request-count: 12\n")
+	data := []byte("auth-maintenance:\n  enable: false\n  scan-interval-seconds: 7\n  delete-interval-seconds: 3\n  delete-status-codes: [402, 429]\n  disable-status-codes: [403, 500]\n  delete-quota-exceeded: true\n  quota-strike-threshold: 5\n  disable-codex-usage-limit-reached: false\n  codex-max-request-count: 12\n")
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -56,6 +59,9 @@ func TestLoadConfigOptional_AuthMaintenanceExplicitConfig(t *testing.T) {
 	}
 	if len(cfg.AuthMaintenance.DeleteStatusCodes) != 2 || cfg.AuthMaintenance.DeleteStatusCodes[0] != 402 || cfg.AuthMaintenance.DeleteStatusCodes[1] != 429 {
 		t.Fatalf("DeleteStatusCodes = %#v, want [402 429]", cfg.AuthMaintenance.DeleteStatusCodes)
+	}
+	if len(cfg.AuthMaintenance.DisableStatusCodes) != 2 || cfg.AuthMaintenance.DisableStatusCodes[0] != 403 || cfg.AuthMaintenance.DisableStatusCodes[1] != 500 {
+		t.Fatalf("DisableStatusCodes = %#v, want [403 500]", cfg.AuthMaintenance.DisableStatusCodes)
 	}
 	if !cfg.AuthMaintenance.DeleteQuotaExceeded {
 		t.Fatalf("DeleteQuotaExceeded = false, want true")
