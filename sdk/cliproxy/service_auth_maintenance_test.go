@@ -80,7 +80,7 @@ func TestAuthMaintenanceHook_DisablesAuthFileOnCodexUsageLimitReached(t *testing
 	}
 }
 
-func TestAuthMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *testing.T) {
+func TestAuthMaintenanceHook_DisablesAuthFileOnGenericCodex429(t *testing.T) {
 	service, manager, path, cleanup := newAuthMaintenanceTestService(t, config.Config{
 		AuthRuntime: config.AuthRuntimeConfig{
 			UnauthorizedDeleteThreshold:     2,
@@ -106,25 +106,21 @@ func TestAuthMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *testing.
 		},
 	})
 
-	time.Sleep(500 * time.Millisecond)
+	waitForCondition(t, 3*time.Second, func() bool {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var metadata map[string]any
+		if json.Unmarshal(raw, &metadata) != nil {
+			return false
+		}
+		updated, ok := manager.GetByID(filepath.Base(path))
+		return ok && updated != nil && updated.Disabled && metadata["disabled"] == true
+	})
 
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read auth file: %v", err)
-	}
-	var metadata map[string]any
-	if err := json.Unmarshal(raw, &metadata); err != nil {
-		t.Fatalf("unmarshal auth file: %v", err)
-	}
-	if metadata["disabled"] == true {
-		t.Fatalf("generic 429 should not disable auth file")
-	}
-	updated, ok := manager.GetByID(filepath.Base(path))
-	if !ok || updated == nil {
-		t.Fatalf("expected auth to remain addressable")
-	}
-	if updated.Disabled {
-		t.Fatalf("generic 429 should not disable auth")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("generic 429 should disable auth file instead of removing it: %v", err)
 	}
 }
 
@@ -214,6 +210,75 @@ func TestAuthMaintenanceHook_DisableStatusCodeWinsOverDeleteStatusCode(t *testin
 
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("disable should win over delete for overlapping status codes: %v", err)
+	}
+}
+
+func TestAuthMaintenanceHook_DeleteStatusCode429StillDisablesAuth(t *testing.T) {
+	service, manager, path, cleanup := newAuthMaintenanceTestService(t, config.Config{
+		AuthRuntime: config.AuthRuntimeConfig{
+			UnauthorizedDeleteThreshold:     2,
+			UnauthorizedDeleteWindowSeconds: 600,
+		},
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                true,
+			ScanIntervalSeconds:   1,
+			DeleteIntervalSeconds: 1,
+			DeleteStatusCodes:     []int{http.StatusTooManyRequests},
+		},
+	})
+	defer cleanup()
+	_ = service
+
+	service.handleAuthMaintenanceResult(context.Background(), coreauth.Result{
+		AuthID:   filepath.Base(path),
+		Provider: "codex",
+		Success:  false,
+		Error: &coreauth.Error{
+			HTTPStatus: http.StatusTooManyRequests,
+			Message:    `{"detail":"Rate limit exceeded"}`,
+		},
+	})
+
+	waitForCondition(t, 3*time.Second, func() bool {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var metadata map[string]any
+		if json.Unmarshal(raw, &metadata) != nil {
+			return false
+		}
+		updated, ok := manager.GetByID(filepath.Base(path))
+		return ok && updated != nil && updated.Disabled && metadata["disabled"] == true
+	})
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("delete-status-codes=[429] should still disable instead of deleting: %v", err)
+	}
+}
+
+func TestAuthEligibleForMaintenanceDelete_DoesNotDeleteQuotaExceededAuth(t *testing.T) {
+	auth := &coreauth.Auth{
+		Quota: coreauth.QuotaState{
+			Exceeded:     true,
+			BackoffLevel: 7,
+		},
+	}
+	cfg := config.AuthMaintenanceConfig{
+		DeleteQuotaExceeded:  true,
+		QuotaStrikeThreshold: 6,
+	}
+
+	reason, ok := authEligibleForMaintenanceDisable(auth, nil, cfg)
+	if !ok {
+		t.Fatalf("quota exceeded auth should now be disabled instead of deleted")
+	}
+	if reason != "quota_strikes_7" {
+		t.Fatalf("disable reason = %q, want %q", reason, "quota_strikes_7")
+	}
+
+	if deleteReason, deleteOK := authEligibleForMaintenanceDelete(auth, nil, cfg); deleteOK {
+		t.Fatalf("quota exceeded auth should not be deleted, got delete reason %q", deleteReason)
 	}
 }
 

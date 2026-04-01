@@ -730,6 +730,10 @@ func (s *Service) Run(ctx context.Context) error {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
+			case "success-rate", "successrate", "sr":
+				return "success-rate"
+			case "simhash", "sh":
+				return "simhash"
 			default:
 				return "round-robin"
 			}
@@ -741,10 +745,25 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "success-rate":
+				selector = coreauth.NewSuccessRateSelector(newCfg.Routing.SuccessRate.HalfLifeSeconds, newCfg.Routing.SuccessRate.ExploreRate)
+			case "simhash":
+				selector = coreauth.NewSimHashSelector(newCfg.Routing.SimHash)
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}
 			s.coreManager.SetSelector(selector)
+		} else if s.coreManager != nil {
+			switch nextStrategy {
+			case "success-rate":
+				if selector, ok := s.coreManager.Selector().(*coreauth.SuccessRateSelector); ok && selector != nil {
+					selector.SetConfig(newCfg.Routing.SuccessRate.HalfLifeSeconds, newCfg.Routing.SuccessRate.ExploreRate)
+				}
+			case "simhash":
+				if selector, ok := s.coreManager.Selector().(*coreauth.SimHashSelector); ok && selector != nil {
+					selector.SetConfig(newCfg.Routing.SimHash)
+				}
+			}
 		}
 
 		s.applyRetryConfig(newCfg)

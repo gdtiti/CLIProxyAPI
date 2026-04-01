@@ -333,7 +333,7 @@ func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnCodexUsageLimitReached(t *
 	}
 }
 
-func TestAuthRuntimeMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *testing.T) {
+func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnGenericCodex429(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex-auth.json")
 	data := []byte(`{"type":"codex","email":"user@example.com"}`)
@@ -373,16 +373,16 @@ func TestAuthRuntimeMaintenanceHook_DoesNotDisableAuthFileOnGenericCodex429(t *t
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		t.Fatalf("unmarshal auth file after generic 429: %v", err)
 	}
-	if disabled, _ := metadata["disabled"].(bool); disabled {
-		t.Fatalf("expected generic 429 not to disable auth file")
+	if disabled, _ := metadata["disabled"].(bool); !disabled {
+		t.Fatalf("expected generic 429 to disable auth file")
 	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
 	if !ok || updated == nil {
 		t.Fatalf("expected auth to remain addressable in manager")
 	}
-	if updated.Disabled {
-		t.Fatalf("expected auth to remain enabled after generic 429")
+	if !updated.Disabled {
+		t.Fatalf("expected auth to be disabled after generic 429")
 	}
 }
 
@@ -442,6 +442,23 @@ func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnConfiguredStatusCode(t *te
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("configured disable should not remove auth file: %v", err)
+	}
+}
+
+func TestManagedProtectiveDisableReason_UsesQuotaStrikeReason(t *testing.T) {
+	auth := &coreauth.Auth{
+		Quota: coreauth.QuotaState{
+			Exceeded:     true,
+			BackoffLevel: 5,
+		},
+	}
+
+	reason, ok := managedProtectiveDisableReason(auth, coreauth.Result{Success: false})
+	if !ok {
+		t.Fatalf("quota exceeded auth should produce a disable reason")
+	}
+	if reason != "quota_strikes_5" {
+		t.Fatalf("reason = %q, want %q", reason, "quota_strikes_5")
 	}
 }
 

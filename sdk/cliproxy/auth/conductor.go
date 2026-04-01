@@ -99,6 +99,10 @@ type Result struct {
 	QuotaWindow string
 	// Error describes the failure when Success is false.
 	Error *Error
+	// RequestSimHash stores the request SimHash when simhash routing is active.
+	RequestSimHash uint64
+	// HasRequestSimHash reports whether RequestSimHash is populated.
+	HasRequestSimHash bool
 }
 
 // Selector chooses an auth candidate for execution.
@@ -181,9 +185,13 @@ type Manager struct {
 	executors map[string]ProviderExecutor
 	selector  Selector
 	hook      Hook
-	mu        sync.RWMutex
-	auths     map[string]*Auth
-	scheduler *authScheduler
+	// blockedRequests keeps a runtime-only LRU of request bodies that have already
+	// been confirmed as invalid request shapes, so equivalent retries can be rejected
+	// before they burn another credential.
+	blockedRequests *blockedRequestLRU
+	mu              sync.RWMutex
+	auths           map[string]*Auth
+	scheduler       *authScheduler
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -227,6 +235,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		executors:        make(map[string]ProviderExecutor),
 		selector:         selector,
 		hook:             hook,
+		blockedRequests:  newBlockedRequestLRU(1000),
 		auths:            make(map[string]*Auth),
 		providerOffsets:  make(map[string]int),
 		modelPoolOffsets: make(map[string]int),
@@ -296,6 +305,16 @@ func (m *Manager) SetSelector(selector Selector) {
 		m.scheduler.setSelector(selector)
 		m.syncScheduler()
 	}
+}
+
+// Selector returns the currently configured selector.
+func (m *Manager) Selector() Selector {
+	if m == nil {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.selector
 }
 
 // Hook returns the currently configured lifecycle hook.
@@ -1003,11 +1022,7 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 			auth.Index = existing.Index
 			auth.indexAssigned = existing.indexAssigned
 		}
-		if !existing.Disabled && existing.Status != StatusDisabled && !auth.Disabled && auth.Status != StatusDisabled {
-			if len(auth.ModelStates) == 0 && len(existing.ModelStates) > 0 {
-				auth.ModelStates = existing.ModelStates
-			}
-		}
+		preserveRuntimeAuthState(auth, existing)
 	}
 	if len(auth.ModelStates) > 0 {
 		updateAggregatedAvailability(auth, time.Now())
@@ -1023,6 +1038,48 @@ func (m *Manager) Update(ctx context.Context, auth *Auth) (*Auth, error) {
 	_ = m.persist(ctx, auth)
 	m.hook.OnAuthUpdated(ctx, auth.Clone())
 	return auth.Clone(), nil
+}
+
+func preserveRuntimeAuthState(dst, src *Auth) {
+	if dst == nil || src == nil || dst.Disabled || src.Disabled {
+		return
+	}
+	if len(src.ModelStates) > 0 {
+		if len(dst.ModelStates) == 0 {
+			dst.ModelStates = make(map[string]*ModelState, len(src.ModelStates))
+		}
+		for model, state := range src.ModelStates {
+			if state == nil {
+				continue
+			}
+			if _, exists := dst.ModelStates[model]; exists {
+				continue
+			}
+			dst.ModelStates[model] = state.Clone()
+		}
+	}
+	if !dst.Unavailable && src.Unavailable {
+		dst.Unavailable = true
+	}
+	if dst.Status == "" && src.Status != "" {
+		dst.Status = src.Status
+	}
+	if dst.StatusMessage == "" && src.StatusMessage != "" {
+		dst.StatusMessage = src.StatusMessage
+	}
+	if dst.LastError == nil && src.LastError != nil {
+		dst.LastError = cloneError(src.LastError)
+	}
+	if !dst.Quota.Exceeded && src.Quota.Exceeded {
+		dst.Quota = src.Quota
+	}
+	if dst.NextRetryAfter.IsZero() && !src.NextRetryAfter.IsZero() {
+		dst.NextRetryAfter = src.NextRetryAfter
+	}
+	if !dst.HasLastRequestSimHash && src.HasLastRequestSimHash {
+		dst.LastRequestSimHash = src.LastRequestSimHash
+		dst.HasLastRequestSimHash = true
+	}
 }
 
 // Load resets manager state from the backing store.
@@ -1058,6 +1115,11 @@ func (m *Manager) Load(ctx context.Context) error {
 // Execute performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var err error
+	opts, err = m.rejectBlockedRequest(opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1089,6 +1151,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 // ExecuteCount performs a non-streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	var err error
+	opts, err = m.rejectBlockedRequest(opts)
+	if err != nil {
+		return cliproxyexecutor.Response{}, err
+	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1120,6 +1187,11 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 // ExecuteStream performs a streaming execution using the configured selector and executor.
 // It supports multiple providers for the same model and round-robins the starting provider per model.
 func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	var err error
+	opts, err = m.rejectBlockedRequest(opts)
+	if err != nil {
+		return nil, err
+	}
 	normalized := m.normalizeProviders(providers)
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
@@ -1154,6 +1226,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	opts = ensureRequestSimHashMetadata(opts, m.selector)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
@@ -1182,6 +1255,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		execCtx = withRequestSimHash(execCtx, opts.Metadata)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1195,6 +1269,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 			execReq.Model = upstreamModel
 			resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			attachRequestSimHashResult(&result, opts.Metadata)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -1208,6 +1283,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				result.QuotaWindow = quotaWindowFromError(errExec)
 				m.MarkResult(execCtx, result)
+				m.recordBlockedRequest(opts, errExec)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1233,6 +1309,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	opts = ensureRequestSimHashMetadata(opts, m.selector)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
@@ -1261,6 +1338,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		execCtx = withRequestSimHash(execCtx, opts.Metadata)
 
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
@@ -1274,6 +1352,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 			execReq.Model = upstreamModel
 			resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 			result := Result{AuthID: auth.ID, Provider: provider, Model: resultModel, Success: errExec == nil}
+			attachRequestSimHashResult(&result, opts.Metadata)
 			if errExec != nil {
 				if errCtx := execCtx.Err(); errCtx != nil {
 					return cliproxyexecutor.Response{}, errCtx
@@ -1287,6 +1366,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				}
 				result.QuotaWindow = quotaWindowFromError(errExec)
 				m.MarkResult(execCtx, result)
+				m.recordBlockedRequest(opts, errExec)
 				if isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -1312,6 +1392,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	}
 	routeModel := req.Model
 	opts = ensureRequestedModelMetadata(opts, routeModel)
+	opts = ensureRequestSimHashMetadata(opts, m.selector)
 	tried := make(map[string]struct{})
 	attempted := make(map[string]struct{})
 	var lastErr error
@@ -1348,6 +1429,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			execCtx = context.WithValue(execCtx, roundTripperContextKey{}, rt)
 			execCtx = context.WithValue(execCtx, "cliproxy.roundtripper", rt)
 		}
+		execCtx = withRequestSimHash(execCtx, opts.Metadata)
 		models, pooled := m.preparedExecutionModels(auth, routeModel)
 		if len(models) == 0 {
 			continue
@@ -1358,6 +1440,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
 			}
+			m.recordBlockedRequest(opts, errStream)
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
 			}
@@ -1405,6 +1488,18 @@ func hasRequestedModelMetadata(meta map[string]any) bool {
 	default:
 		return false
 	}
+}
+
+func attachRequestSimHashResult(result *Result, meta map[string]any) {
+	if result == nil || result.HasRequestSimHash {
+		return
+	}
+	hash, ok := requestSimHashFromMetadata(meta)
+	if !ok {
+		return
+	}
+	result.RequestSimHash = hash
+	result.HasRequestSimHash = true
 }
 
 func pinnedAuthIDFromMetadata(meta map[string]any) string {
@@ -1789,6 +1884,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	if result.AuthID == "" {
 		return
 	}
+	if !result.HasRequestSimHash {
+		if hash, ok := requestSimHashFromContext(ctx); ok {
+			result.RequestSimHash = hash
+			result.HasRequestSimHash = true
+		}
+	}
+
+	now := time.Now()
 
 	shouldResumeModel := false
 	shouldSuspendModel := false
@@ -1799,7 +1902,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
-		now := time.Now()
+		if result.HasRequestSimHash {
+			auth.LastRequestSimHash = result.RequestSimHash
+			auth.HasLastRequestSimHash = true
+		}
 
 		if result.Success {
 			ClearUnauthorizedFailureHistory(auth)
@@ -1943,7 +2049,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	m.mu.RLock()
 	selector := m.selector
 	m.mu.RUnlock()
-	if observer, ok := selector.(interface{ ObserveResult(Result) }); ok {
+	if observer, ok := selector.(ResultObserver); ok && observer != nil {
+		observer.ObserveResult(result, now)
+	} else if observer, ok := selector.(interface{ ObserveResult(Result) }); ok {
 		observer.ObserveResult(result)
 	}
 
@@ -2158,6 +2266,31 @@ func statusCodeFromResult(err *Error) int {
 	return err.StatusCode()
 }
 
+func isTransientProviderError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if authErr, ok := err.(*Error); ok && authErr != nil && authErr.Retryable {
+		return true
+	}
+	switch statusCodeFromError(err) {
+	case http.StatusRequestTimeout, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "deadline exceeded") ||
+		strings.Contains(message, "timeout") ||
+		strings.Contains(message, "temporary") ||
+		strings.Contains(message, "connection refused") ||
+		strings.Contains(message, "connection reset") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "eof")
+}
+
 func isModelSupportErrorMessage(message string) bool {
 	lower := strings.ToLower(strings.TrimSpace(message))
 	if lower == "" {
@@ -2211,6 +2344,10 @@ func isModelSupportResultError(err *Error) bool {
 // where switching auths or pooled upstream models will not help. Model-support
 // errors are excluded so routing can fall through to another auth or upstream.
 func isRequestInvalidError(err error) bool {
+	return isBlockableInvalidRequestError(err)
+}
+
+func isBlockableInvalidRequestError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -2219,13 +2356,60 @@ func isRequestInvalidError(err error) bool {
 	}
 	status := statusCodeFromError(err)
 	switch status {
+	case http.StatusUnauthorized, http.StatusTooManyRequests:
+		return false
+	}
+	if isTransientProviderError(err) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	if strings.Contains(message, "invalid_function_parameters") {
+		return true
+	}
+	switch status {
 	case http.StatusBadRequest:
-		return strings.Contains(err.Error(), "invalid_request_error")
+		return strings.Contains(message, "invalid_request_error") ||
+			strings.Contains(message, "invalid response format") ||
+			strings.Contains(message, "invalid_response_format") ||
+			strings.Contains(message, "response_format")
 	case http.StatusUnprocessableEntity:
 		return true
 	default:
 		return false
 	}
+}
+
+func (m *Manager) rejectBlockedRequest(opts cliproxyexecutor.Options) (cliproxyexecutor.Options, error) {
+	if m == nil || m.blockedRequests == nil {
+		return opts, nil
+	}
+	updated, hash, ok := requestBodyHashFromOptions(opts)
+	if !ok {
+		return updated, nil
+	}
+	if !m.blockedRequests.Contains(hash) {
+		return updated, nil
+	}
+	return updated, &Error{
+		Code:       "blocked_invalid_request",
+		Message:    "request body matches a previously blocked invalid request",
+		Retryable:  false,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+func (m *Manager) recordBlockedRequest(opts cliproxyexecutor.Options, err error) {
+	if m == nil || m.blockedRequests == nil || !isBlockableInvalidRequestError(err) {
+		return
+	}
+	_, hash, ok := requestBodyHashFromOptions(opts)
+	if !ok {
+		return
+	}
+	m.blockedRequests.Add(hash)
 }
 
 func applyAuthFailureState(auth *Auth, provider string, resultErr *Error, retryAfter *time.Duration, quotaWindow string, now time.Time) {

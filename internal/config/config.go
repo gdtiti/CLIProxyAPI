@@ -337,14 +337,15 @@ type AuthMaintenanceConfig struct {
 	DeleteIntervalSeconds int `yaml:"delete-interval-seconds" json:"delete-interval-seconds"`
 
 	// DeleteStatusCodes defines immediate delete status codes for runtime auths.
-	// This is an opt-in extension beyond the existing 401 threshold behavior.
+	// HTTP 429 is always protected and will be disabled instead of deleted.
 	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
 
 	// DisableStatusCodes defines immediate disable status codes for runtime auths.
 	// When the same code appears in both disable and delete lists, disable wins.
 	DisableStatusCodes []int `yaml:"disable-status-codes" json:"disable-status-codes"`
 
-	// DeleteQuotaExceeded enables delete candidates for auths with repeated quota exhaustion.
+	// DeleteQuotaExceeded keeps the legacy quota-maintenance switch name for compatibility.
+	// Quota-exhausted auths are now disabled instead of deleted.
 	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
 
 	// QuotaStrikeThreshold is the minimum quota strike count required before delete is queued.
@@ -367,8 +368,33 @@ type AuthMaintenanceConfig struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "success-rate", "simhash".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// SuccessRate configures the "success-rate" routing strategy.
+	SuccessRate RoutingSuccessRateConfig `yaml:"success-rate" json:"success-rate"`
+
+	// SimHash configures the simhash selector virtual pool behavior.
+	SimHash RoutingSimHashConfig `yaml:"simhash" json:"simhash"`
+}
+
+// RoutingSuccessRateConfig configures the success-rate selector.
+// The selector uses a time-decayed (EMA) success rate per auth and model.
+type RoutingSuccessRateConfig struct {
+	// HalfLifeSeconds is the EMA half-life in seconds. Default: 1800 (30 minutes).
+	HalfLifeSeconds int `yaml:"half-life-seconds" json:"half-life-seconds"`
+	// ExploreRate is the probability [0,1] of randomly exploring an auth candidate.
+	// Default: 0.02.
+	ExploreRate float64 `yaml:"explore-rate" json:"explore-rate"`
+}
+
+// RoutingSimHashConfig configures the simhash selector virtual pool behavior.
+type RoutingSimHashConfig struct {
+	// PoolSize defines the global virtual pool target size. Default: 10.
+	PoolSize int `yaml:"pool-size" json:"pool-size"`
+	// AdmitCooldownSeconds defines the minimum interval between admitting new available auths
+	// into the virtual pool after the pool has been filled at least once. Default: 1.
+	AdmitCooldownSeconds int `yaml:"admit-cooldown-seconds" json:"admit-cooldown-seconds"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -856,6 +882,27 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	if cfg.MaxRetryCredentials < 0 {
 		cfg.MaxRetryCredentials = 0
+	}
+
+	// Sanitize routing config.
+	cfg.Routing.Strategy = strings.TrimSpace(cfg.Routing.Strategy)
+	if cfg.Routing.SuccessRate.HalfLifeSeconds <= 0 {
+		cfg.Routing.SuccessRate.HalfLifeSeconds = 1800
+	}
+	if cfg.Routing.SuccessRate.ExploreRate == 0 {
+		cfg.Routing.SuccessRate.ExploreRate = 0.02
+	}
+	if cfg.Routing.SuccessRate.ExploreRate < 0 {
+		cfg.Routing.SuccessRate.ExploreRate = 0
+	}
+	if cfg.Routing.SuccessRate.ExploreRate > 1 {
+		cfg.Routing.SuccessRate.ExploreRate = 1
+	}
+	if cfg.Routing.SimHash.PoolSize <= 0 {
+		cfg.Routing.SimHash.PoolSize = 10
+	}
+	if cfg.Routing.SimHash.AdmitCooldownSeconds <= 0 {
+		cfg.Routing.SimHash.AdmitCooldownSeconds = 1
 	}
 
 	// Sync request authentication providers with inline API keys for backwards compatibility.
@@ -1650,6 +1697,20 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "routing.success-rate.half-life-seconds":
+			return node.Value == "1800"
+		case "routing.simhash.pool-size":
+			return node.Value == "10"
+		case "routing.simhash.admit-cooldown-seconds":
+			return node.Value == "1"
+		}
+	}
+
+	// Check float defaults
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!float" {
+		switch fullPath {
+		case "routing.success-rate.explore-rate":
+			return node.Value == "0.02"
 		}
 	}
 

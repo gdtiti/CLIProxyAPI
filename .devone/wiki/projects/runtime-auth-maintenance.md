@@ -5,14 +5,15 @@
 当前项目已经同时具备两层 auth 维护能力：
 
 - `auth-runtime`：定义 `401` 连续失败的阈值和时间窗口。
-- `auth-maintenance`：定义后台维护循环、队列节流、扩展删除条件，以及 `codex usage_limit_reached` 的禁用动作。
+- `auth-maintenance`：定义后台维护循环、队列节流、扩展删除条件，以及 `429 / quota` 保护性禁用动作。
 
 这两层现在是配合关系，不是替代关系。
 
 ## 当前行为边界
 
 - `codex` 返回 `429` 且错误体包含 `usage_limit_reached` 时，auth 文件会被写成 `disabled=true`，并在运行态内存中禁用。
-- 普通 `codex 429` 不会被误禁用，也不会被误删。
+- 任意 `429` 现在都会走保护性禁用，不再因为维护逻辑被删除。
+- 已进入 `quota exceeded` / backoff 状态的账号现在也会走保护性禁用，不再因为维护逻辑被删除。
 - `401` 不走立即删除，而是继续沿用 `auth-runtime` 的阈值与窗口策略，达到阈值后由后台维护队列删除 auth 文件。
 - watcher 会对内部删除做短时抑制，对内部写入做去抖，避免维护线程和 watcher 彼此打架。
 
@@ -20,6 +21,7 @@
 
 - `auth-maintenance.disable-status-codes`
   - 可按上游 HTTP 状态码直接禁用文件型 auth。
+  - `429` 已改为内建保护性禁用，即使只出现在 `delete-status-codes` 中也不会删除。
   - 若同一状态码同时出现在 `disable-status-codes` 和 `delete-status-codes`，当前实现以禁用优先。
 - `auth-maintenance.codex-max-request-count`
   - 可按累计已完成请求次数回收文件型 `codex` auth。
@@ -54,6 +56,7 @@ auth-maintenance:
 
 - `401` 连续失败仍按原有阈值窗口删除。
 - `usage_limit_reached` 仍然只禁用，不删除。
+- `429` 与 `quota exceeded` 现在都会自动禁用，不删除。
 - 可以为任意上游 HTTP 状态码配置“立即禁用”。
 - 可以额外为 `codex` 文件 auth 配置累计请求次数上限；达到阈值后删除 auth 文件。
 - 多节点部署时继续复用此前已经落地的 `distributed-sync` 配置。
@@ -100,13 +103,14 @@ distributed-sync:
   - 控制队列执行间隔；backlog 大时会自动加速。
 - `auth-maintenance.delete-status-codes`
   - 额外的立即删除状态码列表。
-  - 默认空列表，避免把 generic `429` 误处理成删除。
+  - 默认空列表；其中 `429` 会被保护性改写为禁用，不会删除。
 - `auth-maintenance.disable-status-codes`
   - 额外的立即禁用状态码列表。
   - 默认空列表；命中时会把 auth 文件写成 `disabled=true`，不删除文件。
   - 若与 `delete-status-codes` 同时包含同一状态码，当前实现以 disable 优先。
 - `auth-maintenance.delete-quota-exceeded`
-  - 打开后允许根据 quota/backoff 状态生成删除 candidate。
+  - 历史兼容开关名，当前用于启用 quota/backoff 维护判断。
+  - 命中 quota/backoff 状态时会禁用账号，不会删除文件。
 - `auth-maintenance.quota-strike-threshold`
   - 当前项目使用 `Quota.BackoffLevel` 作为 strike 计数近似值。
 - `auth-maintenance.disable-codex-usage-limit-reached`
@@ -135,11 +139,11 @@ distributed-sync:
   - 保持 `disable-status-codes: []`
   - 保持 `disable-codex-usage-limit-reached: true`
 - 希望某些上游错误码直接禁用账号时：
-  - 在 `disable-status-codes` 中显式列出，例如 `429`、`403`
+  - 在 `disable-status-codes` 中显式列出，例如 `403`
   - 若同一状态码同时也在 `delete-status-codes` 中，当前实现会优先禁用，不会删除
 - 希望扩展某些确定不可恢复的错误码为立即删除时：
   - 在 `delete-status-codes` 中显式列出，例如 `402`、`404`
-  - 不建议在没有充分验证前把 generic `429` 放进去
+  - `429` 不再属于删除候选，即使误配到这里也只会禁用
 - 希望一个 `codex` 文件 auth 用满固定次数后立即回收时：
   - 设置 `codex-max-request-count: <正整数>`
   - 当前实现按“累计所有已完成请求”计数，不区分成功和失败
