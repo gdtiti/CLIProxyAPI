@@ -25,6 +25,10 @@ remote-management:
   # 设为 true 时，禁用内置管理控制面板的资源下载和 HTTP 路由。
   disable-control-panel: false
 
+  # 设为 true 时，禁用从 GitHub 自动定期后台更新管理面板（默认：false）。
+  # 启用后，仅在本地缺失时按需下载一次，之后不再自动更新。
+  # disable-auto-update-panel: false
+
   # 管理控制面板的 GitHub 仓库。接受仓库 URL 或 releases API URL。
   panel-github-repository: 'https://github.com/router-for-me/Cli-Proxy-API-Management-Center'
 
@@ -270,6 +274,8 @@ nonstream-keepalive-interval: 0
 #     models: # 提供商支持的模型。
 #       - name: "moonshotai/kimi-k2:free" # 实际模型名称。
 #         alias: "kimi-k2" # API 中使用的别名。
+#         thinking:        # 可选：省略时默认支持 ["low", "medium", "high"]。
+#           levels: ["low", "medium", "high"]
 #       # 可以对同一别名重复配置，以构建内部模型池。
 #       # 客户端在模型列表中仍只看到一个别名。
 #       # 对该别名的请求将在以下上游名称之间轮询，
@@ -338,6 +344,9 @@ nonstream-keepalive-interval: 0
 # 这些别名会同时影响模型列表和请求路由中的模型 ID 重命名。
 # 支持的通道：gemini-cli、vertex、aistudio、antigravity、claude、codex、qwen、iflow、kiro、github-copilot、kimi。
 # 注意：别名不适用于 gemini-api-key、codex-api-key、claude-api-key、openai-compatibility、vertex-api-key 或 ampcode。
+# 注意：由于别名会同时影响合并后的 /v1 模型列表与请求路由，跨提供商复用同名别名时可能产生歧义。
+# `/api/provider/{provider}/...` 只能帮助选择协议入口，最终推理后端仍可能跟随解析后的模型或别名。
+# 若需要严格绑定后端，请使用唯一别名、唯一前缀，或避免重叠名称。
 # 可以对同一 name 配置不同 alias，以暴露多个客户端模型名称。
 oauth-model-alias:
   antigravity:
