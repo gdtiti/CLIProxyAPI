@@ -352,3 +352,119 @@
   - 1. 进入 end 做收尾与 merge readiness 检查（推荐）：completion 门禁已具备进入收尾条件。
   - 2. 先同步 wiki / 相关知识状态：适合知识层尚未闭环时。
   - 3. 保留当前结论并等待用户确认后续动作：适合需要用户决定是否继续 merge/cleanup 时。
+
+## [20260401-232630] create
+
+- 任务: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
+- 任务包: .devone/data/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
+- 当前阶段: workflow
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 全量 (full)
+- 本轮结果: 任务包已创建；工作流=devone；设计模式=classic；执行模式=full
+- 资料包检查: execution gate 未通过（阻塞 42）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 需求说明.md 缺少已补全的字段：当前问题
+  - 需求说明.md 缺少已补全的字段：影响对象
+  - 需求说明.md 缺少已补全的字段：触发背景
+- 下一步建议:
+  - 1. 补齐 discovery 文档并重跑 execution 审计（推荐）：当前资料包还不能安全进入 execution。
+  - 2. 调整任务范围或执行模式：适合当前资料包长期卡在骨架或范围过大时。
+  - 3. 记录阻塞并暂停在 discovery：当外部依赖或事实源不足时使用。
+
+## [20260401-233221] update-status
+
+- 任务: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
+- 任务包: .devone/data/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
+- 当前阶段: discovery
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 全量 (full)
+- 本轮结果: 完成 discovery 首轮收敛，锁定四阶段吸收顺序与阶段合并策略，准备重跑 execution gate。
+- 资料包检查: execution gate 通过（阻塞 0）
+- 记忆记录: 未使用 nocturne_memory
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 创建 worktree 并进入 execution（推荐）：资料包已通过 execution 门禁，可以开始实施。
+  - 2. 再审一轮设计与测试计划：适合在真正编码前做一次低成本收敛。
+  - 3. 调整范围、工作流或设计模式：当当前拆解还不够贴合任务时使用。
+
+## [20260401-233221] update-task-block
+
+- 任务: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
+- 任务包: .devone/data/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
+- 当前阶段: discovery
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 全量 (full)
+- 本轮结果: 任务块=R1；状态=done；产出=1；验证=1；备注=已更新
+- 资料包检查: execution gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 创建 worktree 并进入 execution（推荐）：资料包已通过 execution 门禁，可以开始实施。
+  - 2. 再审一轮设计与测试计划：适合在真正编码前做一次低成本收敛。
+  - 3. 调整范围、工作流或设计模式：当当前拆解还不够贴合任务时使用。
+
+## [20260401-233221] audit
+
+- 任务: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
+- 任务包: .devone/data/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
+- 当前阶段: discovery
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 全量 (full)
+- 本轮结果: 执行 execution gate 检查，结果=通过
+- 资料包检查: execution gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 创建 worktree 并进入 execution（推荐）：资料包已通过 execution 门禁，可以开始实施。
+  - 2. 再审一轮设计与测试计划：适合在真正编码前做一次低成本收敛。
+  - 3. 调整范围、工作流或设计模式：当当前拆解还不够贴合任务时使用。
+
+## [20260401-233221] update-task-block
+
+- 任务: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
+- 任务包: .devone/data/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
+- 当前阶段: discovery
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 全量 (full)
+- 本轮结果: 任务块=R2；状态=done；前置条件=1；产出=2；验证=1；备注=已更新
+- 资料包检查: execution gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 创建 worktree 并进入 execution（推荐）：资料包已通过 execution 门禁，可以开始实施。
+  - 2. 再审一轮设计与测试计划：适合在真正编码前做一次低成本收敛。
+  - 3. 调整范围、工作流或设计模式：当当前拆解还不够贴合任务时使用。
+
+## [20260401-233612] worktree-create
+
+- 任务: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
+- 任务包: .devone/data/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
+- 当前阶段: discovery
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 全量 (full)
+- 本轮结果: worktree=ready；目录=.devone/worktree/20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线；分支=devone/20260401-232630-CassiopeiaCode；端口=36191；R2.5->done
+- 资料包检查: acceptance gate 未通过（阻塞 1）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - R3 当前状态=pending，进入 acceptance 前必须为 done
+- 下一步建议:
+  - 1. 补齐 discovery 文档并重跑 acceptance 审计（推荐）：当前资料包还不能安全进入 execution。
+  - 2. 调整任务范围或执行模式：适合当前资料包长期卡在骨架或范围过大时。
+  - 3. 记录阻塞并暂停在 discovery：当外部依赖或事实源不足时使用。
