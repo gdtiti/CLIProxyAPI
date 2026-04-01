@@ -590,7 +590,11 @@ func (s *Service) scanAuthMaintenanceCandidates(cfg config.AuthMaintenanceConfig
 
 		action := authMaintenancePendingCandidateAction(auth)
 		reason, hasReason := authMaintenancePendingReason(auth)
-		if action == "" {
+		if protectedReason, ok := authProtectedMaintenanceDisableReason(auth, nil); ok {
+			action = authMaintenanceActionDisable
+			reason = protectedReason
+			hasReason = true
+		} else if action == "" {
 			if shouldDisableAuthAfterUsageLimitFromState(auth, cfg) {
 				action = authMaintenanceActionDisable
 				reason = "disabled after usage_limit_reached"
@@ -1022,6 +1026,9 @@ func shouldDisableAuthAfterUsageLimitFromState(auth *coreauth.Auth, cfg config.A
 }
 
 func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Result, cfg config.AuthMaintenanceConfig) (string, bool) {
+	if reason, ok := authProtectedMaintenanceDisableReason(auth, result); ok {
+		return reason, true
+	}
 	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
 		return "", false
 	}
@@ -1033,6 +1040,22 @@ func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Res
 	}
 	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && containsStatusCode(cfg.DisableStatusCodes, statusCode) {
 		return fmt.Sprintf("http_%d", statusCode), true
+	}
+	return "", false
+}
+
+func authProtectedMaintenanceDisableReason(auth *coreauth.Auth, result *coreauth.Result) (string, bool) {
+	if auth == nil {
+		return "", false
+	}
+	if statusCode := authMaintenanceStatusCode(auth, result); statusCode == http.StatusTooManyRequests {
+		return fmt.Sprintf("http_%d", statusCode), true
+	}
+	if auth.Quota.Exceeded {
+		if auth.Quota.BackoffLevel > 0 {
+			return fmt.Sprintf("quota_strikes_%d", auth.Quota.BackoffLevel), true
+		}
+		return "quota_exceeded", true
 	}
 	return "", false
 }
@@ -1083,13 +1106,16 @@ func isUsageLimitNode(node gjson.Result) bool {
 }
 
 func authEligibleForMaintenanceDelete(auth *coreauth.Auth, result *coreauth.Result, cfg config.AuthMaintenanceConfig) (string, bool) {
+	if _, ok := authProtectedMaintenanceDisableReason(auth, result); ok {
+		return "", false
+	}
 	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
 		return authMaintenancePendingReason(auth)
 	}
 	if auth == nil {
 		return "", false
 	}
-	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && statusCode != http.StatusUnauthorized && containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
+	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && statusCode != http.StatusUnauthorized && statusCode != http.StatusTooManyRequests && containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
 		return fmt.Sprintf("http_%d", statusCode), true
 	}
 	if cfg.DeleteQuotaExceeded && auth.Quota.Exceeded && auth.Quota.BackoffLevel >= cfg.QuotaStrikeThreshold {

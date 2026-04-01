@@ -59,6 +59,15 @@ func (h *authRuntimeMaintenanceHook) OnResult(ctx context.Context, result coreau
 		}
 		return
 	}
+	if reason, ok := managedProtectiveDisableReason(auth, result); ok {
+		if !shouldTrackUnauthorizedCleanup(auth) {
+			return
+		}
+		if err := h.handler.handleManagedAuthDisable(ctx, auth, reason); err != nil {
+			log.WithError(err).Warnf("management: protective disable failed for %s", auth.ID)
+		}
+		return
+	}
 	if reason, ok := h.handler.disableStatusCodeReason(result); ok {
 		if !shouldTrackUnauthorizedCleanup(auth) {
 			return
@@ -155,6 +164,22 @@ func shouldDisableCodexUsageLimitReached(result coreauth.Result) bool {
 		return false
 	}
 	return containsUsageLimitReached(result.Error.Message)
+}
+
+func managedProtectiveDisableReason(auth *coreauth.Auth, result coreauth.Result) (string, bool) {
+	if result.Success || auth == nil {
+		return "", false
+	}
+	if statusCode := unauthorizedCleanupStatusCode(result.Error); statusCode == http.StatusTooManyRequests {
+		return fmt.Sprintf("http_%d", statusCode), true
+	}
+	if auth.Quota.Exceeded {
+		if auth.Quota.BackoffLevel > 0 {
+			return fmt.Sprintf("quota_strikes_%d", auth.Quota.BackoffLevel), true
+		}
+		return "quota_exceeded", true
+	}
+	return "", false
 }
 
 func containsUsageLimitReached(raw string) bool {

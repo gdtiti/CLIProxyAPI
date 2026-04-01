@@ -118,13 +118,20 @@ auth-runtime:
 
 # 运行时认证维护扩展。
 auth-maintenance:
-  disable-status-codes: [500,401,502,504,429] # 匹配上游 HTTP 状态码时禁用文件型运行时认证；若同时存在于 delete-status-codes 中，禁用优先。
+  delete-quota-exceeded: false # 历史兼容开关；额度用尽账号现在自动禁用，不自动删除。
+  disable-status-codes: [500,401,502,504] # 匹配上游 HTTP 状态码时禁用文件型运行时认证；429 现在自动禁用，无需重复配置。
   codex-max-request-count: 0 # 完成 N 次请求后删除文件型 Codex 认证；0 表示禁用。
   codex-quota-check-request-interval: 2 # 每完成 N 次请求探测一次 Codex 用量；若探测返回 401 则删除文件型认证。0 表示禁用。
 
 # 多凭据匹配时的路由策略。
 routing:
-  strategy: 'round-robin' # round-robin（默认），fill-first
+  strategy: 'round-robin' # round-robin（默认），fill-first，success-rate，simhash
+  # success-rate:
+  #   half-life-seconds: 1800 # 成功率 EMA 半衰期，默认 1800 秒
+  #   explore-rate: 0.02      # 探索概率，范围 [0,1]，默认 0.02
+  # simhash:
+  #   pool-size: 10               # 全局虚拟池目标大小，默认 10
+  #   admit-cooldown-seconds: 1   # 池首次填满后，新 auth 再入池的最小间隔，默认 1 秒
 
 # 设为 true 时，启用 WebSocket API（/v1/ws）的身份验证。
 ws-auth: false
