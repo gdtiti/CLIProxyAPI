@@ -16,6 +16,18 @@
 - `401` 不走立即删除，而是继续沿用 `auth-runtime` 的阈值与窗口策略，达到阈值后由后台维护队列删除 auth 文件。
 - watcher 会对内部删除做短时抑制，对内部写入做去抖，避免维护线程和 watcher 彼此打架。
 
+## 最近新增能力
+
+- `auth-maintenance.disable-status-codes`
+  - 可按上游 HTTP 状态码直接禁用文件型 auth。
+  - 若同一状态码同时出现在 `disable-status-codes` 和 `delete-status-codes`，当前实现以禁用优先。
+- `auth-maintenance.codex-max-request-count`
+  - 可按累计已完成请求次数回收文件型 `codex` auth。
+  - `0` 表示关闭；达到阈值后直接删除 auth 文件。
+- `auth-maintenance.codex-quota-check-request-interval`
+  - 可按累计已完成请求次数周期性探测 Codex usage API。
+  - 只有 probe 返回 `401` 时才删除 auth；非 `401` 或 probe 失败都只保留账号，不触发删除。
+
 ## 配置方法
 
 ```yaml

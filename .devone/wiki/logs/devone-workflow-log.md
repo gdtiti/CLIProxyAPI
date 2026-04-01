@@ -255,3 +255,100 @@
   - 1. 进入 end 做收尾与 merge readiness 检查（推荐）：completion 门禁已具备进入收尾条件。
   - 2. 先同步 wiki / 相关知识状态：适合知识层尚未闭环时。
   - 3. 保留当前结论并等待用户确认后续动作：适合需要用户决定是否继续 merge/cleanup 时。
+
+## [20260331-134029] create
+
+- 任务: disable-auth-on-upstream-status-codes
+- 任务包: .devone/data/20260331-134029-disable-auth-on-upstream-status-codes
+- 当前阶段: workflow
+- 当前状态: in_progress
+- 工作流档位: 极简 (devone-mini)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 任务包已创建；工作流=devone-mini；设计模式=classic；执行模式=required-only
+- 资料包检查: execution gate 未通过（阻塞 2）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - R1 当前状态=pending，进入 execution 前必须为 done
+  - R2 当前状态=pending，进入 execution 前必须为 done
+- 下一步建议:
+  - 1. 补齐 discovery 文档并重跑 execution 审计（推荐）：当前资料包还不能安全进入 execution。
+  - 2. 调整任务范围或执行模式：适合当前资料包长期卡在骨架或范围过大时。
+  - 3. 记录阻塞并暂停在 discovery：当外部依赖或事实源不足时使用。
+
+## [20260331-140324] create
+
+- 任务: auth quota check on request threshold
+- 任务包: .devone/data/20260331-140324-auth-quota-check-on-request-threshold
+- 当前阶段: workflow
+- 当前状态: in_progress
+- 工作流档位: 极简 (devone-mini)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 任务包已创建；工作流=devone-mini；设计模式=classic；执行模式=required-only
+- 资料包检查: execution gate 未通过（阻塞 2）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - R1 当前状态=pending，进入 execution 前必须为 done
+  - R2 当前状态=pending，进入 execution 前必须为 done
+- 下一步建议:
+  - 1. 补齐 discovery 文档并重跑 execution 审计（推荐）：当前资料包还不能安全进入 execution。
+  - 2. 调整任务范围或执行模式：适合当前资料包长期卡在骨架或范围过大时。
+  - 3. 记录阻塞并暂停在 discovery：当外部依赖或事实源不足时使用。
+
+## [20260331-142355] audit
+
+- 任务: auth quota check on request threshold
+- 任务包: .devone/data/20260331-140324-auth-quota-check-on-request-threshold
+- 当前阶段: discovery
+- 当前状态: in_progress
+- 工作流档位: 极简 (devone-mini)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 execution gate 检查，结果=通过
+- 资料包检查: execution gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 创建 worktree 并进入 execution（推荐）：资料包已通过 execution 门禁，可以开始实施。
+  - 2. 再审一轮设计与测试计划：适合在真正编码前做一次低成本收敛。
+  - 3. 调整范围、工作流或设计模式：当当前拆解还不够贴合任务时使用。
+
+## [20260331-143511] audit
+
+- 任务: auth quota check on request threshold
+- 任务包: .devone/data/20260331-140324-auth-quota-check-on-request-threshold
+- 当前阶段: acceptance
+- 当前状态: conditionally_accepted
+- 工作流档位: 极简 (devone-mini)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 acceptance gate 检查，结果=通过
+- 资料包检查: acceptance gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 进入 end 做收尾与 merge readiness 检查（推荐）：completion 门禁已具备进入收尾条件。
+  - 2. 先同步 wiki / 相关知识状态：适合知识层尚未闭环时。
+  - 3. 保留当前结论并等待用户确认后续动作：适合需要用户决定是否继续 merge/cleanup 时。
+
+## [20260331-143511] audit
+
+- 任务: auth quota check on request threshold
+- 任务包: .devone/data/20260331-140324-auth-quota-check-on-request-threshold
+- 当前阶段: acceptance
+- 当前状态: conditionally_accepted
+- 工作流档位: 极简 (devone-mini)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 completion gate 检查，结果=通过
+- 资料包检查: completion gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 进入 end 做收尾与 merge readiness 检查（推荐）：completion 门禁已具备进入收尾条件。
+  - 2. 先同步 wiki / 相关知识状态：适合知识层尚未闭环时。
+  - 3. 保留当前结论并等待用户确认后续动作：适合需要用户决定是否继续 merge/cleanup 时。
