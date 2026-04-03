@@ -4,6 +4,21 @@
 > 当最终收尾时如果 worktree 保留，必须至少更新最近收尾状态、最近收尾时间、cleanup 状态和解决的问题。
 
 ## 条目
+### 20260402-095726-配置暂停分布式记录与认证回收站清理能力
+
+- 任务名称: 配置暂停分布式记录与认证回收站清理能力
+- 任务包: .devone/data/20260402-095726-配置暂停分布式记录与认证回收站清理能力
+- worktree 目录: .devone/worktree/20260402-095726-配置暂停分布式记录与认证回收站清理能力
+- worktree 分支: devone/20260402-095726
+- 开发端口: 31076
+- 创建时间: 20260402-100416
+- 最近收尾状态: blocked
+- 最近收尾时间: 20260402-140913
+- cleanup 状态: kept
+- 目标分支: main
+- 解决的问题: 已完成暂停 distributed recording、auth recycle bin、distributed cleanup 与 usage history cleanup 功能并通过验收，但收尾合并被主工作区脏改动阻断
+- 备注: 20260402-140913 尝试 merge dry-run into=main 时失败：主工作区存在已修改 tracked 文件；本轮保留 worktree，待主工作区清理后重试 merge 与 cleanup
+
 ### 20260401-232630-吸收-CassiopeiaCode-优化能力并分阶段合并主线
 
 - 任务名称: 吸收 CassiopeiaCode 优化能力并分阶段合并主线
