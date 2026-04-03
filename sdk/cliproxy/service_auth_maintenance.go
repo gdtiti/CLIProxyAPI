@@ -480,11 +480,11 @@ func (s *Service) handleAuthMaintenanceResult(ctx context.Context, result coreau
 			}
 			return
 		}
-		candidate, ok := s.authMaintenanceCandidateForAuth(auth, authDir, "removed after unauthorized threshold", authMaintenanceActionDelete)
+		candidate, ok := s.authMaintenanceCandidateForAuth(auth, authDir, "disabled after unauthorized threshold", authMaintenanceActionDisable)
 		if !ok {
 			return
 		}
-		if authMaintenancePendingAction(auth, authMaintenanceActionDelete) && s.authMaintenanceIsTracked(candidate.Key) {
+		if authMaintenancePendingAction(auth, authMaintenanceActionDisable) && s.authMaintenanceIsTracked(candidate.Key) {
 			return
 		}
 		s.markAuthMaintenanceCandidate(ctx, candidate, authID)
@@ -529,7 +529,7 @@ func (s *Service) markAuthMaintenanceCandidate(ctx context.Context, candidate au
 		case authMaintenanceActionDisable:
 			s.applyCoreAuthDisableWithReason(updateCtx, id, candidate.Reason, true)
 		default:
-			s.applyCoreAuthRemovalWithReason(updateCtx, id, candidate.Reason, true)
+			s.applyCoreAuthDisableWithReason(updateCtx, id, candidate.Reason, true)
 		}
 	}
 }
@@ -590,6 +590,9 @@ func (s *Service) scanAuthMaintenanceCandidates(cfg config.AuthMaintenanceConfig
 
 		action := authMaintenancePendingCandidateAction(auth)
 		reason, hasReason := authMaintenancePendingReason(auth)
+		if action == authMaintenanceActionDelete {
+			action = authMaintenanceActionDisable
+		}
 		if protectedReason, ok := authProtectedMaintenanceDisableReason(auth, nil); ok {
 			action = authMaintenanceActionDisable
 			reason = protectedReason
@@ -645,7 +648,7 @@ func (s *Service) applyAuthMaintenanceCandidate(ctx context.Context, candidate a
 	case authMaintenanceActionDisable:
 		return s.disableAuthMaintenanceCandidate(ctx, candidate)
 	default:
-		return s.deleteAuthMaintenanceCandidate(ctx, candidate)
+		return s.disableAuthMaintenanceCandidate(ctx, candidate)
 	}
 }
 
@@ -1030,7 +1033,7 @@ func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Res
 		return reason, true
 	}
 	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
-		return "", false
+		return authMaintenancePendingReason(auth)
 	}
 	if authMaintenancePendingAction(auth, authMaintenanceActionDisable) {
 		return authMaintenancePendingReason(auth)
@@ -1038,8 +1041,16 @@ func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Res
 	if auth == nil {
 		return "", false
 	}
-	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && containsStatusCode(cfg.DisableStatusCodes, statusCode) {
-		return fmt.Sprintf("http_%d", statusCode), true
+	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 {
+		if containsStatusCode(cfg.DisableStatusCodes, statusCode) {
+			return fmt.Sprintf("http_%d", statusCode), true
+		}
+		if statusCode != http.StatusUnauthorized && containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
+			return fmt.Sprintf("http_%d", statusCode), true
+		}
+	}
+	if cfg.DeleteQuotaExceeded && auth.Quota.Exceeded && auth.Quota.BackoffLevel >= cfg.QuotaStrikeThreshold {
+		return fmt.Sprintf("quota_strikes_%d", auth.Quota.BackoffLevel), true
 	}
 	return "", false
 }
@@ -1106,21 +1117,9 @@ func isUsageLimitNode(node gjson.Result) bool {
 }
 
 func authEligibleForMaintenanceDelete(auth *coreauth.Auth, result *coreauth.Result, cfg config.AuthMaintenanceConfig) (string, bool) {
-	if _, ok := authProtectedMaintenanceDisableReason(auth, result); ok {
-		return "", false
-	}
-	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
-		return authMaintenancePendingReason(auth)
-	}
-	if auth == nil {
-		return "", false
-	}
-	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && statusCode != http.StatusUnauthorized && statusCode != http.StatusTooManyRequests && containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
-		return fmt.Sprintf("http_%d", statusCode), true
-	}
-	if cfg.DeleteQuotaExceeded && auth.Quota.Exceeded && auth.Quota.BackoffLevel >= cfg.QuotaStrikeThreshold {
-		return fmt.Sprintf("quota_strikes_%d", auth.Quota.BackoffLevel), true
-	}
+	_ = auth
+	_ = result
+	_ = cfg
 	return "", false
 }
 
@@ -1257,7 +1256,7 @@ func authMaintenancePendingReason(auth *coreauth.Auth) (string, bool) {
 		case authMaintenanceActionDisable:
 			return "disabled after usage_limit_reached", true
 		default:
-			return "removed via auth maintenance", true
+			return "disabled via auth maintenance", true
 		}
 	}
 	return reason, true
