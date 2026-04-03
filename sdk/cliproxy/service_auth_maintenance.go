@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -36,6 +37,10 @@ const (
 	authMaintenancePendingDisableMetadataKey = "auth_maintenance_pending_disable"
 	authMaintenanceReasonMetadataKey         = "auth_maintenance_reason"
 )
+
+type authFilesStorePersister interface {
+	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
+}
 
 type authMaintenanceAction string
 
@@ -705,14 +710,51 @@ func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate 
 	path := strings.TrimSpace(candidate.Path)
 	var cleanupErr error
 	if path != "" {
+		authDir := ""
+		s.cfgMu.RLock()
+		if s.cfg != nil {
+			authDir = strings.TrimSpace(s.cfg.AuthDir)
+		}
+		s.cfgMu.RUnlock()
 		if s.watcher != nil {
 			s.watcher.SuppressAuthPath(path, authMaintenanceSuppressWindow)
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove auth file: %w", err)
-		}
-		if err := s.deleteAuthTokenRecord(ctx, path); err != nil {
-			cleanupErr = fmt.Errorf("delete auth token record: %w", err)
+		if authDir == "" || sdkAuth.IsTrashPath(authDir, path) {
+			if err := s.deleteAuthTokenRecord(ctx, path); err != nil {
+				cleanupErr = fmt.Errorf("delete auth token record: %w", err)
+			}
+		} else {
+			logicalRel, errRel := sdkAuth.RelativePath(authDir, path)
+			if errRel != nil || sdkAuth.IsTrashRelative(logicalRel) {
+				logicalRel = filepath.Base(path)
+			}
+			trashPath, _, errTrash := sdkAuth.TrashPathForRelative(authDir, logicalRel)
+			if errTrash != nil {
+				return fmt.Errorf("resolve auth recycle bin path: %w", errTrash)
+			}
+			if err := os.MkdirAll(filepath.Dir(trashPath), 0o700); err != nil {
+				return fmt.Errorf("prepare auth recycle bin: %w", err)
+			}
+			if err := os.Remove(trashPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("clear existing recycle bin entry: %w", err)
+			}
+			if err := os.Rename(path, trashPath); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					if errDelete := s.deleteAuthTokenRecord(ctx, path); errDelete != nil {
+						cleanupErr = fmt.Errorf("delete auth token record: %w", errDelete)
+					}
+				} else {
+					return fmt.Errorf("move auth file to recycle bin: %w", err)
+				}
+			} else {
+				if err := s.persistAuthTrashMove(ctx, path, trashPath); err != nil {
+					if rollbackErr := os.Rename(trashPath, path); rollbackErr != nil {
+						log.WithError(rollbackErr).Warnf("failed to rollback auth recycle bin move for %s", logicalRel)
+					}
+					return err
+				}
+				sdkAuth.PruneEmptyParentDirs(authDir, filepath.Dir(path))
+			}
 		}
 	}
 	for _, id := range candidate.IDs {
@@ -721,6 +763,27 @@ func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate 
 		}
 	}
 	return cleanupErr
+}
+
+func (s *Service) persistAuthTrashMove(ctx context.Context, sourcePath, trashPath string) error {
+	store := sdkAuth.GetTokenStore()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg != nil {
+		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(cfg.AuthDir)
+		}
+	}
+	if persister, ok := store.(authFilesStorePersister); ok {
+		if err := persister.PersistAuthFiles(ctx, fmt.Sprintf("Trash auth %s", filepath.Base(sourcePath)), sourcePath, trashPath); err != nil {
+			return fmt.Errorf("persist auth recycle bin move: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) deleteAuthTokenRecord(ctx context.Context, path string) error {
@@ -1193,10 +1256,13 @@ func resolveAuthFilePath(auth *coreauth.Auth, authDir string) string {
 		if authDir == "" {
 			return ""
 		}
-		path = filepath.Join(authDir, filepath.Base(path))
+		path = filepath.Join(authDir, filepath.FromSlash(path))
 	}
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
+	}
+	if authDir != "" && sdkAuth.IsTrashPath(authDir, path) {
+		return ""
 	}
 	return path
 }

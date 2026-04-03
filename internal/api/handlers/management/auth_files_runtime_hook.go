@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/authfs"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -484,10 +485,22 @@ func (h *Handler) removeManagedAuthFile(ctx context.Context, auth *coreauth.Auth
 		h.disableAuth(ctx, auth.ID)
 		return nil
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove auth file: %w", err)
+	if h != nil && h.cfg != nil && authfs.IsTrashPath(h.cfg.AuthDir, path) {
+		h.disableAuth(ctx, auth.ID)
+		return nil
 	}
-	if err := h.deleteTokenRecord(ctx, path); err != nil {
+	logicalRel, ok := h.authLogicalRelativePath(auth, filepath.Base(path))
+	if !ok {
+		logicalRel = filepath.Base(path)
+	}
+	if _, err := h.moveAuthFileToTrash(ctx, path, logicalRel, "Trash auth"); err != nil {
+		if errors.Is(err, errAuthFileNotFound) {
+			if errDelete := h.deleteTokenRecord(ctx, path); errDelete != nil {
+				return errDelete
+			}
+			h.disableAuth(ctx, auth.ID)
+			return nil
+		}
 		return err
 	}
 	h.disableAuth(ctx, auth.ID)

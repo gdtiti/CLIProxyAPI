@@ -693,6 +693,9 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
 		mgmt.POST("/auth-files/reload-from-store", s.mgmt.PostReloadAuthFilesFromStore)
+		mgmt.GET("/auth-files/recycle-bin", s.mgmt.ListAuthRecycleBin)
+		mgmt.POST("/auth-files/recycle-bin/restore", s.mgmt.RestoreAuthFile)
+		mgmt.DELETE("/auth-files/recycle-bin", s.mgmt.PurgeAuthRecycleBin)
 
 		mgmt.PATCH("/auth-files/excluded-models/batch", s.mgmt.PatchAuthFilesExcludedModelsBatch)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
