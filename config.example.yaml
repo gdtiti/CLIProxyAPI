@@ -96,6 +96,20 @@ force-model-prefix: false
 # 默认为 false（禁用）。
 passthrough-headers: false
 
+# 可选的异步请求审计 hook，用于把请求体特征与执行结果发往外部分析端。
+# 支持 http(s) 端点和 Unix domain socket（unix:///path/to/hook.sock）。
+# request-audit:
+#   enable: false
+#   endpoint: "unix:///tmp/cliproxy-codex-audit.sock"
+#   providers:
+#     - codex
+#   queue-size: 256
+#   timeout-seconds: 5
+#   # JSON 请求/响应体会先做压缩再截断：
+#   # 长度超过 6 的数组只保留前 3 和后 3；
+#   # 长度超过 100 的字符串只保留前 50 和后 50。
+#   max-body-bytes: 262144
+
 # 请求重试次数。当 HTTP 响应码为 403、408、500、502、503 或 504 时会进行重试。
 request-retry: 1
 
@@ -235,8 +249,20 @@ nonstream-keepalive-interval: 0
 # 仅在客户端未发送请求头时用于文件型/OAuth Codex 请求。
 # `user-agent` 适用于 HTTP 和 WebSocket 请求；
 # `beta-features` 仅适用于 WebSocket 请求。不适用于 codex-api-key 条目。
+# `codex-mimic.mode` 可用于把更接近 Codex CLI 的头部特征固定下来；
+# `safe` 会保留有价值的会话/请求标识并让 compact 非流请求回到 `/responses` 主链，
+# `strict` 会进一步强制覆盖签名型头部；默认 `off`。
+# codex-mimic:
+#   mode: "safe"
+#   # strict:
+#   #   force-turn-metadata: true   # 严格模式下，缺失时补 "{}"
+#   #   force-turn-state: true      # 严格模式下，WS 缺失时补 turn-state；若同时开启 stable-*，会带稳定派生的 id
+#   #   include-timing-metrics: true # 严格模式下，WS 缺失时补 "true"
+#   #   stable-request-id: true     # 严格模式下，基于 continuity/session_id 稳定派生 request id
+#   #   stable-turn-id: true        # 严格模式下，缺失时补稳定派生的 {"turn_id":"..."}
+#
 # codex-header-defaults:
-#   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
+#   user-agent: "codex_cli_rs/0.116.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 #   beta-features: "multi_agent"
 
 # Kiro（AWS CodeWhisperer）配置

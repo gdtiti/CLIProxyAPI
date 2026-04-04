@@ -75,7 +75,7 @@ var gitLabAgenticCatalog = []gitLabCatalogModel{
 }
 
 var gitLabModelAliases = map[string]string{
-	"duo-chat-haiku-4-6":  "duo-chat-haiku-4-5",
+	"duo-chat-haiku-4-6": "duo-chat-haiku-4-5",
 }
 
 func NewGitLabExecutor(cfg *config.Config) *GitLabExecutor {
@@ -728,7 +728,7 @@ func gitLabGatewayHeaders(auth *cliproxyauth.Auth, targetProvider string) map[st
 	if _, ok := out["User-Agent"]; !ok {
 		out["User-Agent"] = gitLabNativeUserAgent
 	}
-	if strings.EqualFold(strings.TrimSpace(targetProvider), "openai") {
+	if target := strings.ToLower(strings.TrimSpace(targetProvider)); target == "openai" || target == "anthropic" {
 		if _, ok := out["anthropic-beta"]; !ok {
 			out["anthropic-beta"] = gitLabContext1MBeta
 		}

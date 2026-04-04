@@ -90,6 +90,64 @@ func applyCodexContinuityHeaders(headers http.Header, continuity codexContinuity
 	headers.Set("session_id", continuity.Key)
 }
 
+func codexStableIdentitySeed(headers http.Header, source http.Header) string {
+	if headers != nil {
+		if v := strings.TrimSpace(headers.Get("session_id")); v != "" {
+			return v
+		}
+	}
+	if source != nil {
+		if v := strings.TrimSpace(source.Get("session_id")); v != "" {
+			return v
+		}
+		if v := strings.TrimSpace(source.Get("Idempotency-Key")); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func codexStableDerivedID(kind string, headers http.Header, source http.Header) string {
+	seed := codexStableIdentitySeed(headers, source)
+	if seed == "" {
+		return uuid.NewString()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:"+kind+":"+seed)).String()
+}
+
+func codexTurnMetadataValue(turnID string) string {
+	if strings.TrimSpace(turnID) == "" {
+		return "{}"
+	}
+	value, err := sjson.Set("{}", "turn_id", turnID)
+	if err != nil {
+		return fmt.Sprintf(`{"turn_id":"%s"}`, turnID)
+	}
+	return value
+}
+
+func codexStableTurnMetadataValue(headers http.Header, source http.Header) string {
+	return codexTurnMetadataValue(codexStableDerivedID("turn-id", headers, source))
+}
+
+func codexTurnStateValue(turnID, requestID string) string {
+	value := "{}"
+	var err error
+	if strings.TrimSpace(turnID) != "" {
+		value, err = sjson.Set(value, "turn_id", turnID)
+		if err != nil {
+			value = "{}"
+		}
+	}
+	if strings.TrimSpace(requestID) != "" {
+		value, err = sjson.Set(value, "request_id", requestID)
+		if err != nil {
+			return value
+		}
+	}
+	return value
+}
+
 func logCodexRequestDiagnostics(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, headers http.Header, body []byte, continuity codexContinuity) {
 	if !log.IsLevelEnabled(log.DebugLevel) {
 		return

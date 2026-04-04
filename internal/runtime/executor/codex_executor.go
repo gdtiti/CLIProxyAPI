@@ -31,6 +31,7 @@ import (
 
 const (
 	codexUserAgent  = "codex_cli_rs/0.116.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexVersion    = "0.116.0"
 	codexOriginator = "codex_cli_rs"
 )
 
@@ -80,7 +81,7 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
+	if shouldUseCodexCompactEndpoint(e.cfg, opts.Alt) {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -665,12 +666,43 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
+	profile := buildCodexSignatureProfile(cfg, auth)
+	if profile.Strict() && profile.Version != "" {
+		r.Header.Set("Version", profile.Version)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "Version", profile.Version)
+	}
 	misc.EnsureHeader(r.Header, ginHeaders, "session_id", uuid.NewString())
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	turnMetadataValue := ""
+	stableTurnID := ""
+	if profile.Strict() && profile.StableTurnID {
+		stableTurnID = codexStableDerivedID("turn-id", r.Header, ginHeaders)
+	}
+	if profile.Strict() && profile.StableTurnID {
+		turnMetadataValue = codexTurnMetadataValue(stableTurnID)
+	} else if profile.Strict() && profile.ForceTurnMetadata {
+		turnMetadataValue = profile.TurnMetadataValue
+	}
+	if profile.Strict() && (profile.ForceTurnMetadata || profile.StableTurnID) {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", turnMetadataValue)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
+	}
+	if profile.MimicEnabled() {
+		requestIDValue := uuid.NewString()
+		if profile.Strict() && profile.StableRequestID {
+			requestIDValue = codexStableDerivedID("request-id", r.Header, ginHeaders)
+		}
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", requestIDValue)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	}
+	if profile.Strict() {
+		r.Header.Set("User-Agent", profile.UserAgent)
+	} else {
+		cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -679,15 +711,14 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
+	isAPIKey := profile.IsAPIKey
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		r.Header.Set("Originator", originator)
-	} else if !isAPIKey {
+		if profile.Strict() && profile.Originator != "" {
+			r.Header.Set("Originator", profile.Originator)
+		} else {
+			r.Header.Set("Originator", originator)
+		}
+	} else if profile.Originator != "" && !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {

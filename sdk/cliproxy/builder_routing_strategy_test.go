@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -68,5 +69,34 @@ func TestBuilderBuild_SelectsFeedbackRoutingStrategies(t *testing.T) {
 			}
 			tc.assertType(t, svc.coreManager.Selector())
 		})
+	}
+}
+
+func TestBuilderBuild_WiresRequestAuditHookWhenEnabled(t *testing.T) {
+	server := httptest.NewServer(nil)
+	defer server.Close()
+
+	cfg := &sdkconfig.Config{
+		AuthDir: t.TempDir(),
+		SDKConfig: internalconfig.SDKConfig{
+			RequestAudit: internalconfig.RequestAuditConfig{
+				Enable:   true,
+				Endpoint: server.URL,
+			},
+		},
+	}
+
+	svc, err := NewBuilder().
+		WithConfig(cfg).
+		WithConfigPath(filepath.Join(t.TempDir(), "config.yaml")).
+		Build()
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if svc == nil || svc.coreManager == nil {
+		t.Fatalf("Build() returned nil service/coreManager")
+	}
+	if _, ok := svc.coreManager.Hook().(*requestAuditHook); !ok {
+		t.Fatalf("coreManager.Hook() = %T, want *requestAuditHook", svc.coreManager.Hook())
 	}
 }

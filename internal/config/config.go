@@ -188,6 +188,49 @@ type CodexHeaderDefaults struct {
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
+const (
+	CodexMimicModeOff    = "off"
+	CodexMimicModeSafe   = "safe"
+	CodexMimicModeStrict = "strict"
+)
+
+// CodexMimicConfig controls Codex request signature normalization and upstream compact bypassing.
+type CodexMimicConfig struct {
+	Mode   string                 `yaml:"mode" json:"mode"`
+	Strict CodexMimicStrictConfig `yaml:"strict,omitempty" json:"strict,omitempty"`
+}
+
+// CodexMimicStrictConfig contains opt-in strict-mode masquerade knobs.
+// They are intentionally narrow so strict mode stays controllable instead of fabricating
+// large opaque client state blobs by default.
+type CodexMimicStrictConfig struct {
+	ForceTurnMetadata    bool `yaml:"force-turn-metadata,omitempty" json:"force-turn-metadata,omitempty"`
+	ForceTurnState       bool `yaml:"force-turn-state,omitempty" json:"force-turn-state,omitempty"`
+	IncludeTimingMetrics bool `yaml:"include-timing-metrics,omitempty" json:"include-timing-metrics,omitempty"`
+	StableRequestID      bool `yaml:"stable-request-id,omitempty" json:"stable-request-id,omitempty"`
+	StableTurnID         bool `yaml:"stable-turn-id,omitempty" json:"stable-turn-id,omitempty"`
+}
+
+// CodexMimicMode returns the normalized Codex mimic mode.
+func (cfg *SDKConfig) CodexMimicMode() string {
+	if cfg == nil {
+		return CodexMimicModeOff
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.CodexMimic.Mode)) {
+	case CodexMimicModeSafe:
+		return CodexMimicModeSafe
+	case CodexMimicModeStrict:
+		return CodexMimicModeStrict
+	default:
+		return CodexMimicModeOff
+	}
+}
+
+// CodexMimicEnabled reports whether Codex mimic mode is active.
+func (cfg *SDKConfig) CodexMimicEnabled() bool {
+	return cfg.CodexMimicMode() != CodexMimicModeOff
+}
+
 // TLSConfig holds HTTPS server settings.
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode.
@@ -920,6 +963,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
+	// Sanitize Codex mimic config.
+	cfg.SanitizeCodexMimic()
+
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
 
@@ -1061,6 +1107,14 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+// SanitizeCodexMimic normalizes the configured Codex mimic mode.
+func (cfg *Config) SanitizeCodexMimic() {
+	if cfg == nil {
+		return
+	}
+	cfg.CodexMimic.Mode = cfg.SDKConfig.CodexMimicMode()
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the

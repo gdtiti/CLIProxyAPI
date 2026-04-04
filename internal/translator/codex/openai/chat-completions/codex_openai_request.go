@@ -1,9 +1,8 @@
-// Package openai provides utilities to translate OpenAI Chat Completions
-// request JSON into OpenAI Responses API request JSON using gjson/sjson.
-// It supports tools, multimodal text/image inputs, and Structured Outputs.
-// The package handles the conversion of OpenAI API requests into the format
-// expected by the OpenAI Responses API, including proper mapping of messages,
-// tools, and generation parameters.
+// Package openai provides the legacy gjson/sjson implementation used to
+// translate OpenAI Chat Completions request JSON into OpenAI Responses API
+// request JSON. The fast-path implementation lives in
+// codex_openai_request_fast.go and keeps this legacy path for equivalence
+// testing.
 package chat_completions
 
 import (
@@ -14,10 +13,9 @@ import (
 	"github.com/tidwall/sjson"
 )
 
-// ConvertOpenAIRequestToCodex converts an OpenAI Chat Completions request JSON
-// into an OpenAI Responses API request JSON. The transformation follows the
-// examples defined in docs/2.md exactly, including tools, multi-turn dialog,
-// multimodal text/image handling, and Structured Outputs mapping.
+// convertOpenAIRequestToCodexLegacyImpl is the original gjson/sjson-based
+// translator implementation kept for equivalence testing against the new
+// fast-path implementation.
 //
 // Parameters:
 //   - modelName: The name of the model to use for the request
@@ -26,7 +24,7 @@ import (
 //
 // Returns:
 //   - []byte: The transformed request data in OpenAI Responses API format
-func ConvertOpenAIRequestToCodex(modelName string, inputRawJSON []byte, stream bool) []byte {
+func convertOpenAIRequestToCodexLegacyImpl(modelName string, inputRawJSON []byte, stream bool) []byte {
 	rawJSON := inputRawJSON
 	// Start with empty JSON object
 	out := []byte(`{"instructions":""}`)
