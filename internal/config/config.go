@@ -360,7 +360,7 @@ type QuotaExceeded struct {
 // AuthRuntimeConfig configures runtime auth cleanup policies.
 type AuthRuntimeConfig struct {
 	// UnauthorizedDeleteThreshold controls how many consecutive 401 responses
-	// within the configured window will trigger auth cleanup. Defaults to 3.
+	// within the configured window will trigger automatic auth disable. Defaults to 3.
 	UnauthorizedDeleteThreshold int `yaml:"unauthorized-delete-threshold" json:"unauthorized-delete-threshold"`
 
 	// UnauthorizedDeleteWindowSeconds controls the rolling window used for the
@@ -379,8 +379,8 @@ type AuthMaintenanceConfig struct {
 	// DeleteIntervalSeconds controls the stagger interval between queued file mutations.
 	DeleteIntervalSeconds int `yaml:"delete-interval-seconds" json:"delete-interval-seconds"`
 
-	// DeleteStatusCodes defines immediate delete status codes for runtime auths.
-	// HTTP 429 is always protected and will be disabled instead of deleted.
+	// DeleteStatusCodes keeps the legacy field name for configured automatic maintenance triggers.
+	// Matching runtime auths are now disabled instead of deleted; HTTP 429 is always protected.
 	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
 
 	// DisableStatusCodes defines immediate disable status codes for runtime auths.
@@ -391,19 +391,19 @@ type AuthMaintenanceConfig struct {
 	// Quota-exhausted auths are now disabled instead of deleted.
 	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
 
-	// QuotaStrikeThreshold is the minimum quota strike count required before delete is queued.
+	// QuotaStrikeThreshold is the minimum quota strike count required before automatic disable is queued.
 	QuotaStrikeThreshold int `yaml:"quota-strike-threshold" json:"quota-strike-threshold"`
 
 	// DisableCodexUsageLimitReached keeps the existing project behavior:
 	// Codex usage_limit_reached disables the auth file instead of deleting it.
 	DisableCodexUsageLimitReached bool `yaml:"disable-codex-usage-limit-reached" json:"disable-codex-usage-limit-reached"`
 
-	// CodexMaxRequestCount deletes file-backed codex auth after N completed requests.
-	// Set to 0 to disable this cumulative request-count cleanup.
+	// CodexMaxRequestCount disables file-backed codex auth after N completed requests.
+	// Set to 0 to disable this cumulative request-count maintenance.
 	CodexMaxRequestCount int `yaml:"codex-max-request-count" json:"codex-max-request-count"`
 
 	// CodexQuotaCheckRequestInterval probes the Codex usage API every N completed
-	// requests for file-backed auth; a 401 probe response removes the auth file.
+	// requests for file-backed auth; a 401 probe response disables the auth file.
 	// Set to 0 to disable this periodic quota probe.
 	CodexQuotaCheckRequestInterval int `yaml:"codex-quota-check-request-interval" json:"codex-quota-check-request-interval"`
 }

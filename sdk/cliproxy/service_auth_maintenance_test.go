@@ -282,7 +282,7 @@ func TestAuthEligibleForMaintenanceDelete_DoesNotDeleteQuotaExceededAuth(t *test
 	}
 }
 
-func TestAuthMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t *testing.T) {
+func TestAuthMaintenanceHook_DisablesAuthFileAfterUnauthorizedThreshold(t *testing.T) {
 	service, manager, path, cleanup := newAuthMaintenanceTestService(t, config.Config{
 		AuthRuntime: config.AuthRuntimeConfig{
 			UnauthorizedDeleteThreshold:     2,
@@ -311,8 +311,16 @@ func TestAuthMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t *testin
 	service.handleAuthMaintenanceResult(context.Background(), result)
 
 	waitForCondition(t, 3*time.Second, func() bool {
-		_, err := os.Stat(path)
-		return os.IsNotExist(err)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return false
+		}
+		var metadata map[string]any
+		if json.Unmarshal(raw, &metadata) != nil {
+			return false
+		}
+		updated, ok := manager.GetByID(filepath.Base(path))
+		return ok && updated != nil && updated.Disabled && updated.StatusMessage == "disabled after unauthorized threshold" && metadata["disabled"] == true
 	})
 
 	updated, ok := manager.GetByID(filepath.Base(path))
@@ -320,7 +328,13 @@ func TestAuthMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t *testin
 		t.Fatalf("expected auth record to remain addressable")
 	}
 	if !updated.Disabled {
-		t.Fatalf("expected auth to be disabled after file removal")
+		t.Fatalf("expected auth to be disabled after unauthorized threshold")
+	}
+	if updated.StatusMessage != "disabled after unauthorized threshold" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after unauthorized threshold")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("auth file should remain after automatic disable: %v", err)
 	}
 }
 

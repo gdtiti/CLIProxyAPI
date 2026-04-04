@@ -3,6 +3,7 @@ package cliproxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -36,6 +37,10 @@ const (
 	authMaintenancePendingDisableMetadataKey = "auth_maintenance_pending_disable"
 	authMaintenanceReasonMetadataKey         = "auth_maintenance_reason"
 )
+
+type authFilesStorePersister interface {
+	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
+}
 
 type authMaintenanceAction string
 
@@ -480,11 +485,11 @@ func (s *Service) handleAuthMaintenanceResult(ctx context.Context, result coreau
 			}
 			return
 		}
-		candidate, ok := s.authMaintenanceCandidateForAuth(auth, authDir, "removed after unauthorized threshold", authMaintenanceActionDelete)
+		candidate, ok := s.authMaintenanceCandidateForAuth(auth, authDir, "disabled after unauthorized threshold", authMaintenanceActionDisable)
 		if !ok {
 			return
 		}
-		if authMaintenancePendingAction(auth, authMaintenanceActionDelete) && s.authMaintenanceIsTracked(candidate.Key) {
+		if authMaintenancePendingAction(auth, authMaintenanceActionDisable) && s.authMaintenanceIsTracked(candidate.Key) {
 			return
 		}
 		s.markAuthMaintenanceCandidate(ctx, candidate, authID)
@@ -529,7 +534,7 @@ func (s *Service) markAuthMaintenanceCandidate(ctx context.Context, candidate au
 		case authMaintenanceActionDisable:
 			s.applyCoreAuthDisableWithReason(updateCtx, id, candidate.Reason, true)
 		default:
-			s.applyCoreAuthRemovalWithReason(updateCtx, id, candidate.Reason, true)
+			s.applyCoreAuthDisableWithReason(updateCtx, id, candidate.Reason, true)
 		}
 	}
 }
@@ -590,6 +595,9 @@ func (s *Service) scanAuthMaintenanceCandidates(cfg config.AuthMaintenanceConfig
 
 		action := authMaintenancePendingCandidateAction(auth)
 		reason, hasReason := authMaintenancePendingReason(auth)
+		if action == authMaintenanceActionDelete {
+			action = authMaintenanceActionDisable
+		}
 		if protectedReason, ok := authProtectedMaintenanceDisableReason(auth, nil); ok {
 			action = authMaintenanceActionDisable
 			reason = protectedReason
@@ -645,7 +653,7 @@ func (s *Service) applyAuthMaintenanceCandidate(ctx context.Context, candidate a
 	case authMaintenanceActionDisable:
 		return s.disableAuthMaintenanceCandidate(ctx, candidate)
 	default:
-		return s.deleteAuthMaintenanceCandidate(ctx, candidate)
+		return s.disableAuthMaintenanceCandidate(ctx, candidate)
 	}
 }
 
@@ -702,14 +710,51 @@ func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate 
 	path := strings.TrimSpace(candidate.Path)
 	var cleanupErr error
 	if path != "" {
+		authDir := ""
+		s.cfgMu.RLock()
+		if s.cfg != nil {
+			authDir = strings.TrimSpace(s.cfg.AuthDir)
+		}
+		s.cfgMu.RUnlock()
 		if s.watcher != nil {
 			s.watcher.SuppressAuthPath(path, authMaintenanceSuppressWindow)
 		}
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove auth file: %w", err)
-		}
-		if err := s.deleteAuthTokenRecord(ctx, path); err != nil {
-			cleanupErr = fmt.Errorf("delete auth token record: %w", err)
+		if authDir == "" || sdkAuth.IsTrashPath(authDir, path) {
+			if err := s.deleteAuthTokenRecord(ctx, path); err != nil {
+				cleanupErr = fmt.Errorf("delete auth token record: %w", err)
+			}
+		} else {
+			logicalRel, errRel := sdkAuth.RelativePath(authDir, path)
+			if errRel != nil || sdkAuth.IsTrashRelative(logicalRel) {
+				logicalRel = filepath.Base(path)
+			}
+			trashPath, _, errTrash := sdkAuth.TrashPathForRelative(authDir, logicalRel)
+			if errTrash != nil {
+				return fmt.Errorf("resolve auth recycle bin path: %w", errTrash)
+			}
+			if err := os.MkdirAll(filepath.Dir(trashPath), 0o700); err != nil {
+				return fmt.Errorf("prepare auth recycle bin: %w", err)
+			}
+			if err := os.Remove(trashPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("clear existing recycle bin entry: %w", err)
+			}
+			if err := os.Rename(path, trashPath); err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					if errDelete := s.deleteAuthTokenRecord(ctx, path); errDelete != nil {
+						cleanupErr = fmt.Errorf("delete auth token record: %w", errDelete)
+					}
+				} else {
+					return fmt.Errorf("move auth file to recycle bin: %w", err)
+				}
+			} else {
+				if err := s.persistAuthTrashMove(ctx, path, trashPath); err != nil {
+					if rollbackErr := os.Rename(trashPath, path); rollbackErr != nil {
+						log.WithError(rollbackErr).Warnf("failed to rollback auth recycle bin move for %s", logicalRel)
+					}
+					return err
+				}
+				sdkAuth.PruneEmptyParentDirs(authDir, filepath.Dir(path))
+			}
 		}
 	}
 	for _, id := range candidate.IDs {
@@ -718,6 +763,27 @@ func (s *Service) deleteAuthMaintenanceCandidate(ctx context.Context, candidate 
 		}
 	}
 	return cleanupErr
+}
+
+func (s *Service) persistAuthTrashMove(ctx context.Context, sourcePath, trashPath string) error {
+	store := sdkAuth.GetTokenStore()
+	if store == nil {
+		return fmt.Errorf("token store unavailable")
+	}
+	s.cfgMu.RLock()
+	cfg := s.cfg
+	s.cfgMu.RUnlock()
+	if cfg != nil {
+		if dirSetter, ok := store.(interface{ SetBaseDir(string) }); ok {
+			dirSetter.SetBaseDir(cfg.AuthDir)
+		}
+	}
+	if persister, ok := store.(authFilesStorePersister); ok {
+		if err := persister.PersistAuthFiles(ctx, fmt.Sprintf("Trash auth %s", filepath.Base(sourcePath)), sourcePath, trashPath); err != nil {
+			return fmt.Errorf("persist auth recycle bin move: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Service) deleteAuthTokenRecord(ctx context.Context, path string) error {
@@ -1030,7 +1096,7 @@ func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Res
 		return reason, true
 	}
 	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
-		return "", false
+		return authMaintenancePendingReason(auth)
 	}
 	if authMaintenancePendingAction(auth, authMaintenanceActionDisable) {
 		return authMaintenancePendingReason(auth)
@@ -1038,8 +1104,16 @@ func authEligibleForMaintenanceDisable(auth *coreauth.Auth, result *coreauth.Res
 	if auth == nil {
 		return "", false
 	}
-	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && containsStatusCode(cfg.DisableStatusCodes, statusCode) {
-		return fmt.Sprintf("http_%d", statusCode), true
+	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 {
+		if containsStatusCode(cfg.DisableStatusCodes, statusCode) {
+			return fmt.Sprintf("http_%d", statusCode), true
+		}
+		if statusCode != http.StatusUnauthorized && containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
+			return fmt.Sprintf("http_%d", statusCode), true
+		}
+	}
+	if cfg.DeleteQuotaExceeded && auth.Quota.Exceeded && auth.Quota.BackoffLevel >= cfg.QuotaStrikeThreshold {
+		return fmt.Sprintf("quota_strikes_%d", auth.Quota.BackoffLevel), true
 	}
 	return "", false
 }
@@ -1106,21 +1180,9 @@ func isUsageLimitNode(node gjson.Result) bool {
 }
 
 func authEligibleForMaintenanceDelete(auth *coreauth.Auth, result *coreauth.Result, cfg config.AuthMaintenanceConfig) (string, bool) {
-	if _, ok := authProtectedMaintenanceDisableReason(auth, result); ok {
-		return "", false
-	}
-	if authMaintenancePendingAction(auth, authMaintenanceActionDelete) {
-		return authMaintenancePendingReason(auth)
-	}
-	if auth == nil {
-		return "", false
-	}
-	if statusCode := authMaintenanceStatusCode(auth, result); statusCode > 0 && statusCode != http.StatusUnauthorized && statusCode != http.StatusTooManyRequests && containsStatusCode(cfg.DeleteStatusCodes, statusCode) {
-		return fmt.Sprintf("http_%d", statusCode), true
-	}
-	if cfg.DeleteQuotaExceeded && auth.Quota.Exceeded && auth.Quota.BackoffLevel >= cfg.QuotaStrikeThreshold {
-		return fmt.Sprintf("quota_strikes_%d", auth.Quota.BackoffLevel), true
-	}
+	_ = auth
+	_ = result
+	_ = cfg
 	return "", false
 }
 
@@ -1194,10 +1256,13 @@ func resolveAuthFilePath(auth *coreauth.Auth, authDir string) string {
 		if authDir == "" {
 			return ""
 		}
-		path = filepath.Join(authDir, filepath.Base(path))
+		path = filepath.Join(authDir, filepath.FromSlash(path))
 	}
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
+	}
+	if authDir != "" && sdkAuth.IsTrashPath(authDir, path) {
+		return ""
 	}
 	return path
 }
@@ -1257,7 +1322,7 @@ func authMaintenancePendingReason(auth *coreauth.Auth) (string, bool) {
 		case authMaintenanceActionDisable:
 			return "disabled after usage_limit_reached", true
 		default:
-			return "removed via auth maintenance", true
+			return "disabled via auth maintenance", true
 		}
 	}
 	return reason, true

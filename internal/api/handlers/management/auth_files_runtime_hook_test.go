@@ -15,7 +15,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
-func TestAuthRuntimeMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t *testing.T) {
+func TestAuthRuntimeMaintenanceHook_DisablesAuthFileAfterUnauthorizedThreshold(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex-auth.json")
 	data := []byte(`{"type":"codex","email":"user@example.com"}`)
@@ -46,13 +46,21 @@ func TestAuthRuntimeMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t 
 	for i := 0; i < 2; i++ {
 		manager.MarkResult(context.Background(), result)
 		if _, err := os.Stat(path); err != nil {
-			t.Fatalf("auth file removed too early after %d failures: %v", i+1, err)
+			t.Fatalf("auth file disabled too early after %d failures: %v", i+1, err)
 		}
 	}
 
 	manager.MarkResult(context.Background(), result)
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected auth file to be removed, stat err: %v", err)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected auth file to remain on disk, read err: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal updated auth file: %v", err)
+	}
+	if metadata["disabled"] != true {
+		t.Fatalf("expected auth file to be written with disabled=true, metadata=%v", metadata)
 	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
@@ -60,14 +68,14 @@ func TestAuthRuntimeMaintenanceHook_RemovesAuthFileAfterUnauthorizedThreshold(t 
 		t.Fatalf("expected auth to remain addressable in manager")
 	}
 	if !updated.Disabled {
-		t.Fatalf("expected auth to be disabled after cleanup")
+		t.Fatalf("expected auth to be disabled after unauthorized threshold")
 	}
-	if updated.StatusMessage != "removed via management API" {
-		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "removed via management API")
+	if updated.StatusMessage != "disabled after unauthorized threshold" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after unauthorized threshold")
 	}
 }
 
-func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterMaxRequestCount(t *testing.T) {
+func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterMaxRequestCount(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex-auth.json")
 	data := []byte(`{"type":"codex","email":"user@example.com"}`)
@@ -97,12 +105,20 @@ func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterMaxRequestCount(t *
 
 	manager.MarkResult(context.Background(), result)
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("auth file removed too early after first request: %v", err)
+		t.Fatalf("auth file disabled too early after first request: %v", err)
 	}
 
 	manager.MarkResult(context.Background(), result)
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected auth file to be removed after reaching max request count, stat err: %v", err)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected auth file to remain on disk after reaching max request count, read err: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal updated auth file: %v", err)
+	}
+	if metadata["disabled"] != true {
+		t.Fatalf("expected auth file to be written with disabled=true, metadata=%v", metadata)
 	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
@@ -110,14 +126,14 @@ func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterMaxRequestCount(t *
 		t.Fatalf("expected auth to remain addressable in manager")
 	}
 	if !updated.Disabled {
-		t.Fatalf("expected auth to be disabled after max request cleanup")
+		t.Fatalf("expected auth to be disabled after max request threshold")
 	}
-	if updated.StatusMessage != "removed via management API" {
-		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "removed via management API")
+	if updated.StatusMessage != "disabled after codex_max_request_count" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after codex_max_request_count")
 	}
 }
 
-func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterQuotaProbeUnauthorized(t *testing.T) {
+func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthorized(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex-auth.json")
 	data := []byte(`{"type":"codex","email":"user@example.com"}`)
@@ -183,15 +199,23 @@ func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterQuotaProbeUnauthori
 		t.Fatalf("probeCalls after first request = %d, want 0", got)
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("auth file removed too early after first request: %v", err)
+		t.Fatalf("auth file disabled too early after first request: %v", err)
 	}
 
 	manager.MarkResult(context.Background(), result)
 	if got := probeCalls.Load(); got != 1 {
 		t.Fatalf("probeCalls after second request = %d, want 1", got)
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("expected auth file removed after quota probe 401, stat err: %v", err)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected auth file to remain on disk after quota probe 401, read err: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("unmarshal updated auth file: %v", err)
+	}
+	if metadata["disabled"] != true {
+		t.Fatalf("expected auth file to be written with disabled=true, metadata=%v", metadata)
 	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
@@ -199,10 +223,10 @@ func TestAuthRuntimeMaintenanceHook_RemovesCodexAuthFileAfterQuotaProbeUnauthori
 		t.Fatalf("expected auth to remain addressable in manager")
 	}
 	if !updated.Disabled {
-		t.Fatalf("expected auth to be disabled after quota probe cleanup")
+		t.Fatalf("expected auth to be disabled after quota probe 401")
 	}
-	if updated.StatusMessage != "removed via management API" {
-		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "removed via management API")
+	if updated.StatusMessage != "disabled after codex_quota_probe_401" {
+		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after codex_quota_probe_401")
 	}
 }
 

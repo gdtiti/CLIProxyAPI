@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/authfs"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
@@ -114,10 +115,10 @@ func (h *Handler) handleCodexRequestMaintenance(ctx context.Context, auth *corea
 
 	count := coreauth.RecordCompletedRequest(auth)
 	if limit > 0 && count >= limit {
-		if err := h.removeManagedAuthFile(ctx, auth); err != nil {
-			log.WithError(err).Warnf("management: codex request-count cleanup failed for %s", auth.ID)
+		if err := h.handleManagedAuthDisable(ctx, auth, "disabled after codex_max_request_count"); err != nil {
+			log.WithError(err).Warnf("management: codex request-count disable failed for %s", auth.ID)
 			if _, updateErr := h.authManager.Update(ctx, auth); updateErr != nil {
-				log.WithError(updateErr).Warnf("management: persist codex request count after cleanup failure failed for %s", auth.ID)
+				log.WithError(updateErr).Warnf("management: persist codex request count after disable failure failed for %s", auth.ID)
 			}
 			return false
 		}
@@ -129,10 +130,10 @@ func (h *Handler) handleCodexRequestMaintenance(ctx context.Context, auth *corea
 		if err != nil {
 			log.WithError(err).Warnf("management: codex quota probe failed for %s", auth.ID)
 		} else if statusCode == http.StatusUnauthorized {
-			if err := h.removeManagedAuthFile(ctx, auth); err != nil {
-				log.WithError(err).Warnf("management: codex quota 401 cleanup failed for %s", auth.ID)
+			if err := h.handleManagedAuthDisable(ctx, auth, "disabled after codex_quota_probe_401"); err != nil {
+				log.WithError(err).Warnf("management: codex quota 401 disable failed for %s", auth.ID)
 				if _, updateErr := h.authManager.Update(ctx, auth); updateErr != nil {
-					log.WithError(updateErr).Warnf("management: persist codex request count after quota cleanup failure failed for %s", auth.ID)
+					log.WithError(updateErr).Warnf("management: persist codex request count after quota disable failure failed for %s", auth.ID)
 				}
 				return false
 			}
@@ -362,7 +363,7 @@ func (h *Handler) handleUnauthorizedAuthCleanup(ctx context.Context, auth *corea
 	if projectID := strings.TrimSpace(authAttribute(auth, "gemini_virtual_project")); projectID != "" {
 		return h.removeGeminiVirtualAuth(ctx, auth, projectID)
 	}
-	return h.removeManagedAuthFile(ctx, auth)
+	return h.handleManagedAuthDisable(ctx, auth, "disabled after unauthorized threshold")
 }
 
 func (h *Handler) handleManagedAuthDisable(ctx context.Context, auth *coreauth.Auth, reason string) error {
@@ -411,7 +412,7 @@ func (h *Handler) handleManagedAuthDisable(ctx context.Context, auth *coreauth.A
 func (h *Handler) removeGeminiVirtualAuth(ctx context.Context, auth *coreauth.Auth, projectID string) error {
 	projectID = strings.TrimSpace(projectID)
 	if projectID == "" {
-		return h.removeManagedAuthFile(ctx, auth)
+		return h.handleManagedAuthDisable(ctx, auth, "disabled after unauthorized threshold")
 	}
 
 	target := auth
@@ -426,7 +427,7 @@ func (h *Handler) removeGeminiVirtualAuth(ctx context.Context, auth *coreauth.Au
 		return err
 	}
 	if strings.TrimSpace(path) == "" {
-		return h.removeManagedAuthFile(ctx, target)
+		return h.handleManagedAuthDisable(ctx, target, "disabled after unauthorized threshold")
 	}
 
 	projects := splitManagedGeminiProjectIDs(metadata["project_id"])
@@ -438,10 +439,10 @@ func (h *Handler) removeGeminiVirtualAuth(ctx context.Context, auth *coreauth.Au
 		remaining = append(remaining, candidate)
 	}
 	if len(remaining) == len(projects) {
-		return h.removeManagedAuthFile(ctx, target)
+		return h.handleManagedAuthDisable(ctx, target, "disabled after unauthorized threshold")
 	}
 	if len(remaining) == 0 {
-		return h.removeManagedAuthFile(ctx, target)
+		return h.handleManagedAuthDisable(ctx, target, "disabled after unauthorized threshold")
 	}
 
 	metadata["project_id"] = strings.Join(remaining, ",")
@@ -484,10 +485,22 @@ func (h *Handler) removeManagedAuthFile(ctx context.Context, auth *coreauth.Auth
 		h.disableAuth(ctx, auth.ID)
 		return nil
 	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("remove auth file: %w", err)
+	if h != nil && h.cfg != nil && authfs.IsTrashPath(h.cfg.AuthDir, path) {
+		h.disableAuth(ctx, auth.ID)
+		return nil
 	}
-	if err := h.deleteTokenRecord(ctx, path); err != nil {
+	logicalRel, ok := h.authLogicalRelativePath(auth, filepath.Base(path))
+	if !ok {
+		logicalRel = filepath.Base(path)
+	}
+	if _, err := h.moveAuthFileToTrash(ctx, path, logicalRel, "Trash auth"); err != nil {
+		if errors.Is(err, errAuthFileNotFound) {
+			if errDelete := h.deleteTokenRecord(ctx, path); errDelete != nil {
+				return errDelete
+			}
+			h.disableAuth(ctx, auth.ID)
+			return nil
+		}
 		return err
 	}
 	h.disableAuth(ctx, auth.ID)
