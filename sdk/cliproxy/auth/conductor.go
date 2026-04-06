@@ -106,9 +106,23 @@ type Result struct {
 	HasRequestSimHash bool
 }
 
+const codexBackgroundRefreshWarmWindow = time.Hour
+
 // Selector chooses an auth candidate for execution.
 type Selector interface {
 	Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error)
+}
+
+// BackgroundRefreshHints describes runtime-only heat signals emitted by selectors.
+type BackgroundRefreshHints struct {
+	WarmAuthIDs     []string
+	ResidentAuthIDs []string
+}
+
+// BackgroundRefreshHintProvider allows a selector to expose runtime heat hints
+// without leaking its private scheduling structures to refresh logic.
+type BackgroundRefreshHintProvider interface {
+	BackgroundRefreshHints(provider, selectedID string) BackgroundRefreshHints
 }
 
 // Hook captures lifecycle callbacks for observing auth changes.
@@ -1103,6 +1117,15 @@ func preserveRuntimeAuthState(dst, src *Auth) {
 	if dst.NextRetryAfter.IsZero() && !src.NextRetryAfter.IsZero() {
 		dst.NextRetryAfter = src.NextRetryAfter
 	}
+	if dst.LastUsedAt.Before(src.LastUsedAt) {
+		dst.LastUsedAt = src.LastUsedAt
+	}
+	if dst.WarmUntil.Before(src.WarmUntil) {
+		dst.WarmUntil = src.WarmUntil
+	}
+	if dst.ResidentUntil.Before(src.ResidentUntil) {
+		dst.ResidentUntil = src.ResidentUntil
+	}
 	if !dst.HasLastRequestSimHash && src.HasLastRequestSimHash {
 		dst.LastRequestSimHash = src.LastRequestSimHash
 		dst.HasLastRequestSimHash = true
@@ -1942,6 +1965,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 
 		if result.Success {
+			extendBackgroundRefreshWarmth(auth, result.Provider, now)
 			ClearUnauthorizedFailureHistory(auth)
 			if result.Model != "" {
 				state := ensureModelState(auth, result.Model)
@@ -2717,15 +2741,10 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	authCopy := selected.Clone()
 	m.mu.RUnlock()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
+	authCopy := m.finalizeSelectedAuth(selected.ID)
+	if authCopy == nil {
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selected auth disappeared"}
 	}
 	return authCopy, executor, nil
 }
@@ -2749,14 +2768,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 	if selected == nil {
 		return nil, nil, &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
+	authCopy := m.finalizeSelectedAuth(selected.ID)
+	if authCopy == nil {
+		return nil, nil, &Error{Code: "auth_not_found", Message: "selected auth disappeared"}
 	}
 	return authCopy, executor, nil
 }
@@ -2825,21 +2839,15 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
-	providerKey := strings.TrimSpace(strings.ToLower(selected.Provider))
-	executor, okExecutor := m.executors[providerKey]
-	if !okExecutor {
-		m.mu.RUnlock()
-		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
-	}
-	authCopy := selected.Clone()
 	m.mu.RUnlock()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
+	authCopy := m.finalizeSelectedAuth(selected.ID)
+	if authCopy == nil {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selected auth disappeared"}
+	}
+	providerKey := strings.TrimSpace(strings.ToLower(authCopy.Provider))
+	executor, okExecutor := m.Executor(providerKey)
+	if !okExecutor {
+		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
 	return authCopy, executor, providerKey, nil
 }
@@ -2880,20 +2888,81 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 	if selected == nil {
 		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selector returned no auth"}
 	}
+	authCopy := m.finalizeSelectedAuth(selected.ID)
+	if authCopy == nil {
+		return nil, nil, "", &Error{Code: "auth_not_found", Message: "selected auth disappeared"}
+	}
+	providerKey = strings.TrimSpace(strings.ToLower(authCopy.Provider))
 	executor, okExecutor := m.Executor(providerKey)
 	if !okExecutor {
 		return nil, nil, "", &Error{Code: "executor_not_found", Message: "executor not registered"}
 	}
-	authCopy := selected.Clone()
-	if !selected.indexAssigned {
-		m.mu.Lock()
-		if current := m.auths[authCopy.ID]; current != nil && !current.indexAssigned {
-			current.EnsureIndex()
-			authCopy = current.Clone()
-		}
-		m.mu.Unlock()
-	}
 	return authCopy, executor, providerKey, nil
+}
+
+func (m *Manager) finalizeSelectedAuth(selectedID string) *Auth {
+	if m == nil || selectedID == "" {
+		return nil
+	}
+	now := time.Now()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	current := m.auths[selectedID]
+	if current == nil {
+		return nil
+	}
+	applyBackgroundRefreshSelectionLocked(m.selector, m.auths, current.Provider, current.ID, now)
+	if !current.indexAssigned {
+		current.EnsureIndex()
+	}
+	return current.Clone()
+}
+
+func applyBackgroundRefreshSelectionLocked(selector Selector, auths map[string]*Auth, provider, selectedID string, now time.Time) {
+	hintProvider, ok := selector.(BackgroundRefreshHintProvider)
+	if !ok || hintProvider == nil {
+		return
+	}
+	applyBackgroundRefreshHintsLocked(auths, provider, now, hintProvider.BackgroundRefreshHints(provider, selectedID))
+}
+
+func applyBackgroundRefreshHintsLocked(auths map[string]*Auth, provider string, now time.Time, hints BackgroundRefreshHints) {
+	if len(auths) == 0 {
+		return
+	}
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		return
+	}
+	applyIDs := func(ids []string, fn func(*Auth, string, time.Time)) {
+		if len(ids) == 0 || fn == nil {
+			return
+		}
+		seen := make(map[string]struct{}, len(ids))
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			auth := auths[id]
+			if auth == nil || auth.Disabled {
+				continue
+			}
+			if strings.ToLower(strings.TrimSpace(auth.Provider)) != provider {
+				continue
+			}
+			fn(auth, provider, now)
+		}
+	}
+
+	applyIDs(hints.WarmAuthIDs, extendBackgroundRefreshWarmth)
+	applyIDs(hints.ResidentAuthIDs, extendBackgroundRefreshResidency)
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -3010,9 +3079,14 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
 		return false
 	}
+	provider := strings.ToLower(a.Provider)
 	if evaluator, ok := a.Runtime.(RefreshEvaluator); ok && evaluator != nil {
-		return evaluator.ShouldRefresh(now, a)
+		if !evaluator.ShouldRefresh(now, a) {
+			return false
+		}
+		return shouldAllowBackgroundRefresh(provider, a, now)
 	}
+	allowBackgroundRefresh := shouldAllowBackgroundRefresh(provider, a, now)
 
 	lastRefresh := a.LastRefreshedAt
 	if lastRefresh.IsZero() {
@@ -3026,36 +3100,109 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if interval := authPreferredInterval(a); interval > 0 {
 		if hasExpiry && !expiry.IsZero() {
 			if !expiry.After(now) {
-				return true
+				return allowBackgroundRefresh
 			}
 			if expiry.Sub(now) <= interval {
-				return true
+				return allowBackgroundRefresh
 			}
 		}
 		if lastRefresh.IsZero() {
-			return true
+			return allowBackgroundRefresh
 		}
-		return now.Sub(lastRefresh) >= interval
+		return now.Sub(lastRefresh) >= interval && allowBackgroundRefresh
 	}
 
-	provider := strings.ToLower(a.Provider)
 	lead := ProviderRefreshLead(provider, a.Runtime)
 	if lead == nil {
 		return false
 	}
 	if *lead <= 0 {
 		if hasExpiry && !expiry.IsZero() {
-			return now.After(expiry)
+			return now.After(expiry) && allowBackgroundRefresh
 		}
 		return false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
+		return time.Until(expiry) <= *lead && allowBackgroundRefresh
 	}
 	if !lastRefresh.IsZero() {
-		return now.Sub(lastRefresh) >= *lead
+		return now.Sub(lastRefresh) >= *lead && allowBackgroundRefresh
 	}
-	return true
+	return allowBackgroundRefresh
+}
+
+func extendBackgroundRefreshWarmth(auth *Auth, provider string, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.LastUsedAt = now
+	window := backgroundRefreshWarmWindow(provider, auth)
+	if window <= 0 {
+		return
+	}
+	until := now.Add(window)
+	if until.After(auth.WarmUntil) {
+		auth.WarmUntil = until
+	}
+}
+
+func extendBackgroundRefreshResidency(auth *Auth, provider string, now time.Time) {
+	if auth == nil {
+		return
+	}
+	window := backgroundRefreshResidentWindow(provider, auth)
+	if window <= 0 {
+		return
+	}
+	until := now.Add(window)
+	if until.After(auth.ResidentUntil) {
+		auth.ResidentUntil = until
+	}
+}
+
+func shouldAllowBackgroundRefresh(provider string, auth *Auth, now time.Time) bool {
+	if !providerRequiresWarmBackgroundRefresh(provider) {
+		return true
+	}
+	return auth.AllowsBackgroundRefresh(now)
+}
+
+func providerRequiresWarmBackgroundRefresh(provider string) bool {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex":
+		return true
+	default:
+		return false
+	}
+}
+
+func backgroundRefreshWarmWindow(provider string, auth *Auth) time.Duration {
+	if auth != nil {
+		if d := durationFromMetadata(auth.Metadata, "background_refresh_warm_window_seconds", "backgroundRefreshWarmWindowSeconds", "warm_window_seconds", "warmWindowSeconds"); d > 0 {
+			return d
+		}
+		if d := durationFromAttributes(auth.Attributes, "background_refresh_warm_window_seconds", "backgroundRefreshWarmWindowSeconds", "warm_window_seconds", "warmWindowSeconds"); d > 0 {
+			return d
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex":
+		return codexBackgroundRefreshWarmWindow
+	default:
+		return 0
+	}
+}
+
+func backgroundRefreshResidentWindow(provider string, auth *Auth) time.Duration {
+	if auth != nil {
+		if d := durationFromMetadata(auth.Metadata, "background_refresh_resident_window_seconds", "backgroundRefreshResidentWindowSeconds", "simhash_resident_window_seconds", "simhashResidentWindowSeconds", "resident_window_seconds", "residentWindowSeconds"); d > 0 {
+			return d
+		}
+		if d := durationFromAttributes(auth.Attributes, "background_refresh_resident_window_seconds", "backgroundRefreshResidentWindowSeconds", "simhash_resident_window_seconds", "simhashResidentWindowSeconds", "resident_window_seconds", "residentWindowSeconds"); d > 0 {
+			return d
+		}
+	}
+	return backgroundRefreshWarmWindow(provider, auth)
 }
 
 func authPreferredInterval(a *Auth) time.Duration {
