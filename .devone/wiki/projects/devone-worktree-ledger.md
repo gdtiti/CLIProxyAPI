@@ -12,12 +12,12 @@
 - worktree 分支: devone/20260406-224921-ghcr-only-main-publish
 - 开发端口: 37206
 - 创建时间: 20260406-230000
-- 最近收尾状态: in_progress
-- 最近收尾时间:
-- cleanup 状态: active
-- 目标分支: gdtiti/main
-- 解决的问题: 将 docker-image workflow 从 DockerHub 发布链路切换为仅发布到 GitHub Container Registry
-- 备注: 当前远端主线在 2026-04-06 已可复现 docker-image 手动触发失败，根因是 Login to DockerHub step 失败；本 worktree 仅处理 GHCR-only 发布改造。
+- 最近收尾状态: blocked
+- 最近收尾时间: 20260407-003503
+- cleanup 状态: kept
+- 目标分支: main
+- 解决的问题: docker-image workflow 已切到 GHCR 且认证回收站缺失源码已补齐
+- 备注: 远端 devone 分支与 workflow 已成功，但主工作区存在既有脏改动，当前保留 worktree 等待后续 fixed closeout。
 
 ### 20260402-095726-配置暂停分布式记录与认证回收站清理能力
 
