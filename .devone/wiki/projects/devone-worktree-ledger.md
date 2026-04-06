@@ -17,7 +17,7 @@
 - cleanup 状态: kept
 - 目标分支: main
 - 解决的问题: docker-image workflow 已切到 GHCR 且认证回收站缺失源码已补齐
-- 备注: 远端 devone 分支与 workflow 已成功，但主工作区存在既有脏改动，当前保留 worktree 等待后续 fixed closeout。
+- 备注: 远端 devone 分支与 workflow 已成功，但当前 fixed closeout 同时受两处条件阻塞：主工作区存在既有脏改动，且本 worktree 里还有 `.tmp-go-build/`、`.tmp-run-24037097490-logs/` 两个未提交临时目录；当前保留 worktree 等待后续清理后再继续。
 
 ### 20260402-095726-配置暂停分布式记录与认证回收站清理能力
 
