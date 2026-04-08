@@ -873,3 +873,117 @@
   - 1. 创建 worktree 并进入 execution（推荐）：资料包已通过 execution 门禁，可以开始实施。
   - 2. 再审一轮设计与测试计划：适合在真正编码前做一次低成本收敛。
   - 3. 调整范围、工作流或设计模式：当当前拆解还不够贴合任务时使用。
+
+## [20260407-003237] audit
+
+- 任务: ghcr-only-main-publish
+- 任务包: .devone/data/20260406-224921-ghcr-only-main-publish
+- 当前阶段: execution
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 acceptance gate 检查，结果=未通过
+- 资料包检查: acceptance gate 未通过（阻塞 1）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 技术说明.md 缺少已补全的字段：说明
+- 下一步建议:
+  - 1. 继续当前 wave 并补证据（推荐）：R3 或 acceptance 门禁尚未就绪。
+  - 2. 回写阻塞、任务状态与未验证项：适合当前实现被依赖或环境卡住时。
+  - 3. 缩小本 wave 范围后继续：适合任务被拆得过大或验证成本过高时。
+
+## [20260407-003237] audit
+
+- 任务: ghcr-only-main-publish
+- 任务包: .devone/data/20260406-224921-ghcr-only-main-publish
+- 当前阶段: execution
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 completion gate 检查，结果=未通过
+- 资料包检查: completion gate 未通过（阻塞 1）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 技术说明.md 缺少已补全的字段：说明
+- 下一步建议:
+  - 1. 继续当前 wave 并补证据（推荐）：R3 或 acceptance 门禁尚未就绪。
+  - 2. 回写阻塞、任务状态与未验证项：适合当前实现被依赖或环境卡住时。
+  - 3. 缩小本 wave 范围后继续：适合任务被拆得过大或验证成本过高时。
+
+## [20260407-003436] audit
+
+- 任务: ghcr-only-main-publish
+- 任务包: .devone/data/20260406-224921-ghcr-only-main-publish
+- 当前阶段: execution
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 completion gate 检查，结果=通过
+- 资料包检查: completion gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 进入 acceptance 做严格验收（推荐）：实现与证据已达到下一阶段门槛。
+  - 2. 补充回归或属性测试：适合继续提高验收把握度。
+  - 3. 先同步 wiki / 相关知识再验收：适合本 wave 产出了高复用结论时。
+
+## [20260407-003436] audit
+
+- 任务: ghcr-only-main-publish
+- 任务包: .devone/data/20260406-224921-ghcr-only-main-publish
+- 当前阶段: execution
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 执行 acceptance gate 检查，结果=通过
+- 资料包检查: acceptance gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 进入 acceptance 做严格验收（推荐）：实现与证据已达到下一阶段门槛。
+  - 2. 补充回归或属性测试：适合继续提高验收把握度。
+  - 3. 先同步 wiki / 相关知识再验收：适合本 wave 产出了高复用结论时。
+
+## [20260407-003503] worktree-closeout
+
+- 任务: ghcr-only-main-publish
+- 任务包: .devone/data/20260406-224921-ghcr-only-main-publish
+- 当前阶段: execution
+- 当前状态: in_progress
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: worktree-closeout；status=blocked；cleanup=kept；into=main
+- 资料包检查: completion gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 进入 acceptance 做严格验收（推荐）：实现与证据已达到下一阶段门槛。
+  - 2. 补充回归或属性测试：适合继续提高验收把握度。
+  - 3. 先同步 wiki / 相关知识再验收：适合本 wave 产出了高复用结论时。
+
+## [20260407-003516] update-status
+
+- 任务: ghcr-only-main-publish
+- 任务包: .devone/data/20260406-224921-ghcr-only-main-publish
+- 当前阶段: acceptance
+- 当前状态: accepted
+- 工作流档位: 标准全量 (devone)
+- 详细设计模式: 经典拆解 (classic)
+- 执行模式: 仅必备任务 (required-only)
+- 本轮结果: 阶段=acceptance；任务包状态=accepted；波次=Closeout；聚焦=R4.5；波次外=O1, O2
+- 资料包检查: completion gate 通过（阻塞 0）
+- 记忆记录: 未记录 nocturne_memory 操作
+- 检查摘要:
+  - 无阻塞问题
+- 下一步建议:
+  - 1. 进入 end 做收尾与 merge readiness 检查（推荐）：completion 门禁已具备进入收尾条件。
+  - 2. 先同步 wiki / 相关知识状态：适合知识层尚未闭环时。
+  - 3. 保留当前结论并等待用户确认后续动作：适合需要用户决定是否继续 merge/cleanup 时。

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/bits"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -310,4 +311,28 @@ func (s *SimHashSelector) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return fmt.Sprintf("SimHashSelector(pool=%d,members=%d,everFilled=%v)", s.effectivePoolSizeLocked(), len(s.pool.members), s.pool.everFilled)
+}
+
+func (s *SimHashSelector) BackgroundRefreshHints(provider, selectedID string) BackgroundRefreshHints {
+	if !providerRequiresWarmBackgroundRefresh(provider) {
+		return BackgroundRefreshHints{}
+	}
+	_ = selectedID
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.pool.members) == 0 {
+		return BackgroundRefreshHints{}
+	}
+
+	residentIDs := make([]string, 0, len(s.pool.members))
+	for authID := range s.pool.members {
+		if authID == "" {
+			continue
+		}
+		residentIDs = append(residentIDs, authID)
+	}
+	sort.Strings(residentIDs)
+	return BackgroundRefreshHints{ResidentAuthIDs: residentIDs}
 }
