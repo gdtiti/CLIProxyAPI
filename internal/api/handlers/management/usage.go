@@ -31,6 +31,9 @@ func parseTimeRange(rangeStr, fromStr, toStr string) (time.Time, time.Time) {
 	from := now.Add(-24 * time.Hour) // 默认 24h
 
 	if rangeStr != "" {
+		if strings.EqualFold(strings.TrimSpace(rangeStr), "all") {
+			return time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC), to
+		}
 		d := parseDuration(rangeStr)
 		from = now.Add(-d)
 		return from, to

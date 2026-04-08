@@ -5,6 +5,8 @@ import (
 	"time"
 )
 
+const defaultSnapshotDetailsLimit = 50000
+
 // QueryAggregates returns aggregate rows within the given time range.
 // If instanceID is empty, all instances are included.
 func (s *PGStore) QueryAggregates(from, to time.Time, instanceID string) ([]AggregateRow, error) {
@@ -42,15 +44,30 @@ func (s *PGStore) QueryAggregates(from, to time.Time, instanceID string) ([]Aggr
 	return result, rows.Err()
 }
 
-
 // QueryDetails returns detail rows within the given time range, limited by limit.
 func (s *PGStore) QueryDetails(from, to time.Time, limit int) ([]DetailRow, error) {
+	return s.QueryDetailsByRange(from, to, "", limit)
+}
+
+// QueryDetailsByRange returns detail rows within the given time range.
+// If instanceID is empty, all instances are included.
+// If limit <= 0, no limit is applied.
+func (s *PGStore) QueryDetailsByRange(from, to time.Time, instanceID string, limit int) ([]DetailRow, error) {
 	q := `SELECT api_key, model, timestamp, source, auth_index,
 		failed, input_tokens, output_tokens, reasoning_tokens,
 		cached_tokens, total_tokens
-		FROM usage_details WHERE timestamp >= $1 AND timestamp < $2
-		ORDER BY timestamp DESC LIMIT $3`
-	rows, err := s.db.Query(q, from, to, limit)
+		FROM usage_details WHERE timestamp >= $1 AND timestamp < $2`
+	args := []interface{}{from, to}
+	if instanceID != "" {
+		q += fmt.Sprintf(" AND instance_id = $%d", len(args)+1)
+		args = append(args, instanceID)
+	}
+	q += " ORDER BY timestamp DESC"
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT $%d", len(args)+1)
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query details: %w", err)
 	}
@@ -102,6 +119,15 @@ func (s *PGStore) QuerySnapshot(from, to time.Time, instanceID string) (Statisti
 	if err != nil {
 		return StatisticsSnapshot{}, err
 	}
+	details, err := s.QueryDetailsByRange(from, to, instanceID, defaultSnapshotDetailsLimit)
+	if err != nil {
+		return StatisticsSnapshot{}, err
+	}
+	return buildSnapshotFromRows(aggs, details), nil
+}
+
+// buildSnapshotFromRows converts aggregate and detail rows into a snapshot.
+func buildSnapshotFromRows(aggs []AggregateRow, details []DetailRow) StatisticsSnapshot {
 	snap := StatisticsSnapshot{
 		APIs:           make(map[string]APISnapshot),
 		RequestsByDay:  make(map[string]int64),
@@ -117,7 +143,10 @@ func (s *PGStore) QuerySnapshot(from, to time.Time, instanceID string) (Statisti
 		buildAPIs(&snap, a)
 		buildTimeBuckets(&snap, a)
 	}
-	return snap, nil
+	for _, d := range details {
+		buildDetails(&snap, d)
+	}
+	return snap
 }
 
 // buildAPIs populates the APIs map in the snapshot from an aggregate row.
@@ -133,6 +162,21 @@ func buildAPIs(snap *StatisticsSnapshot, a AggregateRow) {
 	m.TotalTokens += a.TotalTokens
 	api.Models[a.Model] = m
 	snap.APIs[a.APIKey] = api
+}
+
+// buildDetails populates model details in the snapshot from a detail row.
+func buildDetails(snap *StatisticsSnapshot, d DetailRow) {
+	api, ok := snap.APIs[d.APIKey]
+	if !ok {
+		api = APISnapshot{Models: make(map[string]ModelSnapshot)}
+	}
+	m, ok := api.Models[d.Model]
+	if !ok {
+		m = ModelSnapshot{}
+	}
+	m.Details = append(m.Details, d.Detail)
+	api.Models[d.Model] = m
+	snap.APIs[d.APIKey] = api
 }
 
 // buildTimeBuckets populates day/hour maps in the snapshot from an aggregate row.
