@@ -120,10 +120,14 @@ max-retry-credentials: 0
 # 冷却中的凭据最长等待时间（秒），超时后触发重试。
 max-retry-interval: 30
 
+# 设为 true 时，全局禁用 auth/model 的冷却调度，避免失败状态后的黑窗期。
+disable-cooling: false
+
 # 配额超限行为
 quota-exceeded:
   switch-project: true # 配额超限时是否自动切换到其他项目
   switch-preview-model: true # 配额超限时是否自动切换到预览模型
+  antigravity-credits: true # 是否对 Antigravity 的 quota_exhausted 429 额外重试一次，并启用 enabledCreditTypes=["GOOGLE_ONE_AI"]
 
 # 运行时认证清理策略
 auth-runtime:
@@ -149,6 +153,11 @@ routing:
 
 # 设为 true 时，启用 WebSocket API（/v1/ws）的身份验证。
 ws-auth: false
+
+# 大于 0 时，对非流式响应每 N 秒发送空行，以防止空闲超时。
+# 设为 true 时，启用 Gemini CLI 内部端点（/v1internal:*）。
+# 为安全起见默认关闭。
+enable-gemini-cli-endpoint: false
 
 # 大于 0 时，对非流式响应每 N 秒发送空行，以防止空闲超时。
 nonstream-keepalive-interval: 0
@@ -231,6 +240,8 @@ nonstream-keepalive-interval: 0
 #         - "API"
 #         - "proxy"
 #       cache-user-id: true          # 可选：默认为 false；设为 true 则为每个 API 密钥复用缓存的 user_id，而非每次请求随机生成
+#     experimental-cch-signing: false # 可选：默认为 false；设为 true 时，使用当前 Claude Code cch 算法为最终 /v1/messages body 签名
+#                                     # 除非明确需要，否则保持关闭；上游 seed 变化时将回退到旧代理行为
 
 # Claude API 请求的默认请求头。Claude Code 发布新版本时需要更新。
 # 在传统模式下，user-agent/package-version/runtime-version/timeout 用作客户端省略时的回退值，

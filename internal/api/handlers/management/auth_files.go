@@ -1961,7 +1961,7 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, priority, note) of an auth file.
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
 func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	if h.authManager == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
@@ -1969,11 +1969,12 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 
 	var req struct {
-		Name     string  `json:"name"`
-		Prefix   *string `json:"prefix"`
-		ProxyURL *string `json:"proxy_url"`
-		Priority *int    `json:"priority"`
-		Note     *string `json:"note"`
+		Name     string            `json:"name"`
+		Prefix   *string           `json:"prefix"`
+		ProxyURL *string           `json:"proxy_url"`
+		Headers  map[string]string `json:"headers"`
+		Priority *int              `json:"priority"`
+		Note     *string           `json:"note"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -2008,6 +2009,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errPrefix.Error()})
 			return
 		}
+		if record.Metadata == nil {
+			record.Metadata = make(map[string]any)
+		}
 		record.Prefix = prefixValue
 		if prefixValue == "" {
 			delete(record.Metadata, "prefix")
@@ -2018,6 +2022,9 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	if req.ProxyURL != nil {
 		proxyURL := strings.TrimSpace(*req.ProxyURL)
+		if record.Metadata == nil {
+			record.Metadata = make(map[string]any)
+		}
 		record.ProxyURL = proxyURL
 		if proxyURL == "" {
 			delete(record.Metadata, "proxy_url")
@@ -2025,6 +2032,82 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			record.Metadata["proxy_url"] = proxyURL
 		}
 		changed = true
+	}
+	if len(req.Headers) > 0 {
+		existingHeaders := coreauth.ExtractCustomHeadersFromMetadata(record.Metadata)
+		nextHeaders := make(map[string]string, len(existingHeaders))
+		for k, v := range existingHeaders {
+			nextHeaders[k] = v
+		}
+		headerChanged := false
+
+		for key, value := range req.Headers {
+			name := strings.TrimSpace(key)
+			if name == "" {
+				continue
+			}
+			val := strings.TrimSpace(value)
+			attrKey := "header:" + name
+			if val == "" {
+				if _, ok := nextHeaders[name]; ok {
+					delete(nextHeaders, name)
+					headerChanged = true
+				}
+				if record.Attributes != nil {
+					if _, ok := record.Attributes[attrKey]; ok {
+						headerChanged = true
+					}
+				}
+				continue
+			}
+			if prev, ok := nextHeaders[name]; !ok || prev != val {
+				headerChanged = true
+			}
+			nextHeaders[name] = val
+			if record.Attributes != nil {
+				if prev, ok := record.Attributes[attrKey]; !ok || prev != val {
+					headerChanged = true
+				}
+			} else {
+				headerChanged = true
+			}
+		}
+
+		if headerChanged {
+			if record.Metadata == nil {
+				record.Metadata = make(map[string]any)
+			}
+			if record.Attributes == nil {
+				record.Attributes = make(map[string]string)
+			}
+
+			for key, value := range req.Headers {
+				name := strings.TrimSpace(key)
+				if name == "" {
+					continue
+				}
+				val := strings.TrimSpace(value)
+				attrKey := "header:" + name
+				if val == "" {
+					delete(nextHeaders, name)
+					delete(record.Attributes, attrKey)
+					continue
+				}
+				nextHeaders[name] = val
+				record.Attributes[attrKey] = val
+			}
+
+			if len(nextHeaders) == 0 {
+				delete(record.Metadata, "headers")
+			} else {
+				metaHeaders := make(map[string]any, len(nextHeaders))
+				for k, v := range nextHeaders {
+					metaHeaders[k] = v
+				}
+				record.Metadata["headers"] = metaHeaders
+			}
+			changed = true
+		}
 	}
 	if req.Priority != nil || req.Note != nil {
 		if record.Metadata == nil {

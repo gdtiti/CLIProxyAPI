@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
@@ -55,7 +56,7 @@ func resolveCodexContinuity(ctx context.Context, auth *cliproxyauth.Auth, req cl
 	if executionSession := metadataString(opts.Metadata, cliproxyexecutor.ExecutionSessionMetadataKey); executionSession != "" {
 		return codexContinuity{Key: executionSession, Source: "execution_session"}
 	}
-	if ginCtx := ginContextFrom(ctx); ginCtx != nil {
+	if ginCtx := helps.GinContextFrom(ctx); ginCtx != nil {
 		if ginCtx.Request != nil {
 			if v := strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key")); v != "" {
 				return codexContinuity{Key: v, Source: "idempotency_key"}
@@ -152,7 +153,7 @@ func logCodexRequestDiagnostics(ctx context.Context, auth *cliproxyauth.Auth, re
 	if !log.IsLevelEnabled(log.DebugLevel) {
 		return
 	}
-	entry := logWithRequestID(ctx)
+	entry := helps.LogWithRequestID(ctx)
 	authID := ""
 	authFile := ""
 	if auth != nil {
