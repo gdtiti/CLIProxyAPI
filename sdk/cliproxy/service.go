@@ -125,6 +125,12 @@ type Service struct {
 
 	// maintenanceHookOnce ensures the auth maintenance hook is installed once.
 	maintenanceHookOnce sync.Once
+
+	// maintenanceRecoveryLogMu protects in-memory recovery log snapshots.
+	maintenanceRecoveryLogMu sync.Mutex
+
+	// maintenanceRecoveryRecent stores recent disabled-auth recovery events.
+	maintenanceRecoveryRecent []authMaintenanceRecoveryLogRecord
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.

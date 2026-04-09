@@ -47,6 +47,7 @@ type authMaintenanceAction string
 const (
 	authMaintenanceActionDelete  authMaintenanceAction = "delete"
 	authMaintenanceActionDisable authMaintenanceAction = "disable"
+	authMaintenanceActionRecover authMaintenanceAction = "recover"
 )
 
 type authMaintenanceCandidate struct {
@@ -576,8 +577,13 @@ func (s *Service) scanAuthMaintenanceCandidates(cfg config.AuthMaintenanceConfig
 	idsByPath := make(map[string]map[string]struct{})
 	pathByID := make(map[string]string)
 
+	now := time.Now()
 	for _, auth := range snapshot {
 		if auth == nil || !shouldTrackServiceAuthMaintenance(auth) {
+			continue
+		}
+		if candidate, ok := s.authMaintenanceRecoveryCandidateForAuth(auth, authDir, now); ok {
+			grouped[candidate.Key] = mergeAuthMaintenanceCandidate(grouped[candidate.Key], candidate)
 			continue
 		}
 		path := resolveAuthFilePath(auth, authDir)
@@ -650,6 +656,8 @@ func (s *Service) scanAuthMaintenanceCandidates(cfg config.AuthMaintenanceConfig
 
 func (s *Service) applyAuthMaintenanceCandidate(ctx context.Context, candidate authMaintenanceCandidate) error {
 	switch candidate.Action {
+	case authMaintenanceActionRecover:
+		return s.recoverAuthMaintenanceCandidate(ctx, candidate)
 	case authMaintenanceActionDisable:
 		return s.disableAuthMaintenanceCandidate(ctx, candidate)
 	default:
@@ -664,7 +672,7 @@ func (s *Service) disableAuthMaintenanceCandidate(ctx context.Context, candidate
 	ctx = coreauth.WithSkipPersist(ctx)
 	path := strings.TrimSpace(candidate.Path)
 	if path != "" {
-		if err := writeDisabledAuthFile(path); err != nil {
+		if err := writeDisabledAuthFile(path, candidate.Reason); err != nil {
 			return err
 		}
 	}
@@ -676,7 +684,7 @@ func (s *Service) disableAuthMaintenanceCandidate(ctx context.Context, candidate
 	return nil
 }
 
-func writeDisabledAuthFile(path string) error {
+func writeDisabledAuthFile(path, reason string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -692,6 +700,7 @@ func writeDisabledAuthFile(path string) error {
 		return fmt.Errorf("unmarshal auth file: %w", err)
 	}
 	metadata["disabled"] = true
+	coreauth.MarkAuthMaintenanceAutoRecovery(metadata, reason, time.Now())
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("marshal auth file: %w", err)
@@ -826,6 +835,9 @@ func (s *Service) applyCoreAuthDisableWithReason(ctx context.Context, id, reason
 	existing.Disabled = true
 	existing.Status = coreauth.StatusDisabled
 	existing.StatusMessage = maintenanceStatusMessage(reason, "disabled after usage_limit_reached")
+	if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") && resolveRecoverableAuthFilePath(existing, "") != "" {
+		coreauth.MarkAuthMaintenanceAutoRecovery(existing.Metadata, reason, time.Now())
+	}
 	if pendingDisable {
 		existing.Metadata[authMaintenancePendingDisableMetadataKey] = true
 	} else {
@@ -867,6 +879,7 @@ func (s *Service) applyCoreAuthRemovalWithReason(ctx context.Context, id, reason
 	if existing.Metadata == nil {
 		existing.Metadata = make(map[string]any)
 	}
+	coreauth.ClearAuthMaintenanceAutoRecovery(existing.Metadata)
 	existing.Disabled = true
 	existing.Status = coreauth.StatusDisabled
 	existing.StatusMessage = maintenanceStatusMessage(reason, "removed via auth maintenance")
@@ -1231,10 +1244,19 @@ func containsStatusCode(codes []int, want int) bool {
 }
 
 func resolveAuthFilePath(auth *coreauth.Auth, authDir string) string {
+	return resolveAuthFilePathWithDisabledOption(auth, authDir, false)
+}
+
+func resolveRecoverableAuthFilePath(auth *coreauth.Auth, authDir string) string {
+	return resolveAuthFilePathWithDisabledOption(auth, authDir, true)
+}
+
+func resolveAuthFilePathWithDisabledOption(auth *coreauth.Auth, authDir string, allowDisabled bool) string {
 	if auth == nil {
 		return ""
 	}
 	if (auth.Disabled || auth.Status == coreauth.StatusDisabled) &&
+		!allowDisabled &&
 		!authMaintenancePendingAction(auth, authMaintenanceActionDelete) &&
 		!authMaintenancePendingAction(auth, authMaintenanceActionDisable) {
 		return ""
@@ -1265,6 +1287,36 @@ func resolveAuthFilePath(auth *coreauth.Auth, authDir string) string {
 		return ""
 	}
 	return path
+}
+
+func mergeAuthMaintenanceCandidate(existing, next authMaintenanceCandidate) authMaintenanceCandidate {
+	if next.Key == "" {
+		return existing
+	}
+	if existing.Key == "" {
+		return next
+	}
+	if existing.Reason == "" {
+		existing.Reason = next.Reason
+	}
+	seen := make(map[string]struct{}, len(existing.IDs))
+	for _, id := range existing.IDs {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			seen[trimmed] = struct{}{}
+		}
+	}
+	for _, id := range next.IDs {
+		trimmed := strings.TrimSpace(id)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		existing.IDs = append(existing.IDs, trimmed)
+	}
+	return existing
 }
 
 func authMaintenanceCandidateKey(action authMaintenanceAction, path string) string {
