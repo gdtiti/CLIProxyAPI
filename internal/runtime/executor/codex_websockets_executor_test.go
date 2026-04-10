@@ -518,3 +518,35 @@ func TestNewProxyAwareWebsocketDialerDirectDisablesProxy(t *testing.T) {
 		t.Fatal("expected websocket proxy function to be nil for direct mode")
 	}
 }
+
+func TestNewProxyAwareWebsocketDialerIgnoresFileAuthProxyWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	dialer := newProxyAwareWebsocketDialer(
+		&config.Config{SDKConfig: sdkconfig.SDKConfig{
+			ProxyURL:               "http://global-proxy.example.com:8080",
+			IgnoreAuthFileProxyURL: true,
+		}},
+		&cliproxyauth.Auth{
+			FileName: "auths/codex.json",
+			ProxyURL: "http://file-proxy.example.com:8080",
+		},
+	)
+
+	if dialer.Proxy == nil {
+		t.Fatal("expected websocket proxy function to use global proxy")
+	}
+
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+
+	proxyURL, errProxy := dialer.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("dialer.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL == nil || proxyURL.String() != "http://global-proxy.example.com:8080" {
+		t.Fatalf("proxy URL = %v, want http://global-proxy.example.com:8080", proxyURL)
+	}
+}

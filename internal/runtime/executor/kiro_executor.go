@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai"
@@ -287,13 +288,7 @@ func getKiroPooledHTTPClient() *http.Client {
 // This provides the best of both worlds: custom proxy support + connection reuse.
 func newKiroHTTPClientWithPooling(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	// Check if a proxy is configured - if so, we need a custom client
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := helps.ResolveProxyURL(cfg, auth)
 
 	// If proxy is configured, use the existing proxy-aware client (doesn't pool)
 	if proxyURL != "" {

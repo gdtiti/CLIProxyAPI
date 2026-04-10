@@ -19,6 +19,28 @@ var (
 	httpClientCacheMutex sync.RWMutex
 )
 
+// ResolveAuthProxyURL returns the auth-level proxy override after applying config-level ignore rules.
+func ResolveAuthProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if cfg != nil && cfg.IgnoreAuthFileProxyURL && strings.TrimSpace(auth.FileName) != "" {
+		return ""
+	}
+	return strings.TrimSpace(auth.ProxyURL)
+}
+
+// ResolveProxyURL returns the effective proxy URL using auth override first, then global config.
+func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if proxyURL := ResolveAuthProxyURL(cfg, auth); proxyURL != "" {
+		return proxyURL
+	}
+	if cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(cfg.ProxyURL)
+}
+
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
@@ -35,16 +57,7 @@ var (
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	// Priority 1: Use auth.ProxyURL if configured
-	var proxyURL string
-	if auth != nil {
-		proxyURL = strings.TrimSpace(auth.ProxyURL)
-	}
-
-	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
-	if proxyURL == "" && cfg != nil {
-		proxyURL = strings.TrimSpace(cfg.ProxyURL)
-	}
+	proxyURL := ResolveProxyURL(cfg, auth)
 
 	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
 	if proxyURL != "" {

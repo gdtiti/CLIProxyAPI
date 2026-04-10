@@ -9,6 +9,10 @@ type SDKConfig struct {
 	// ProxyURL is the URL of an optional proxy server to use for outbound requests.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
 
+	// IgnoreAuthFileProxyURL disables proxy_url overrides loaded from file-backed auth records.
+	// When enabled, file-backed auth entries fall back to provider/global proxy settings instead.
+	IgnoreAuthFileProxyURL bool `yaml:"ignore-auth-file-proxy-url" json:"ignore-auth-file-proxy-url"`
+
 	// EnableGeminiCLIEndpoint controls whether Gemini CLI internal endpoints (/v1internal:*) are enabled.
 	// Default is false for safety; when false, /v1internal:* requests are rejected.
 	EnableGeminiCLIEndpoint bool `yaml:"enable-gemini-cli-endpoint" json:"enable-gemini-cli-endpoint"`

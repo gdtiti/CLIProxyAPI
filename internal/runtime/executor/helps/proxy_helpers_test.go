@@ -28,3 +28,57 @@ func TestNewProxyAwareHTTPClientDirectBypassesGlobalProxy(t *testing.T) {
 		t.Fatal("expected direct transport to disable proxy function")
 	}
 }
+
+func TestResolveAuthProxyURLIgnoresFileBackedProxyWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		FileName: "auths/codex.json",
+		ProxyURL: "http://file-proxy.example.com:8080",
+	}
+
+	if got := ResolveAuthProxyURL(cfg, auth); got != "" {
+		t.Fatalf("ResolveAuthProxyURL() = %q, want empty", got)
+	}
+}
+
+func TestResolveAuthProxyURLKeepsConfigBackedProxyWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ProxyURL: "http://config-proxy.example.com:8080",
+	}
+
+	if got := ResolveAuthProxyURL(cfg, auth); got != "http://config-proxy.example.com:8080" {
+		t.Fatalf("ResolveAuthProxyURL() = %q, want %q", got, "http://config-proxy.example.com:8080")
+	}
+}
+
+func TestResolveProxyURLFallsBackToGlobalWhenFileProxyIgnored(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			ProxyURL:               "http://global-proxy.example.com:8080",
+			IgnoreAuthFileProxyURL: true,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		FileName: "auths/codex.json",
+		ProxyURL: "http://file-proxy.example.com:8080",
+	}
+
+	if got := ResolveProxyURL(cfg, auth); got != "http://global-proxy.example.com:8080" {
+		t.Fatalf("ResolveProxyURL() = %q, want %q", got, "http://global-proxy.example.com:8080")
+	}
+}

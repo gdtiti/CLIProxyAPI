@@ -89,6 +89,10 @@ distributed-sync:
 # 每条记录的 proxy-url 也支持 "direct" 或 "none"，以显式绕过全局代理和环境代理。
 proxy-url: ""
 
+# 设为 true 时，忽略文件型认证记录中的 proxy_url，仅使用配置中的代理设置。
+# 这不会影响 config.yaml 里按 provider/api-key 配置的 proxy-url 覆盖。
+ignore-auth-file-proxy-url: false
+
 # 设为 true 时，无前缀的模型请求仅使用没有前缀的凭据（前缀 == 模型名时除外）。
 force-model-prefix: false
 

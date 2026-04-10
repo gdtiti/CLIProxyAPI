@@ -14,6 +14,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	executorhelps "github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
@@ -698,7 +699,7 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	var proxyCandidates []string
 	if auth != nil {
-		if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
+		if proxyStr := executorhelps.ResolveAuthProxyURL(h.cfg, auth); proxyStr != "" {
 			proxyCandidates = append(proxyCandidates, proxyStr)
 		}
 		if h != nil && h.cfg != nil {
