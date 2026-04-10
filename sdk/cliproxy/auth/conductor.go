@@ -3209,16 +3209,22 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
+		var snapshot *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			current.LastError = &Error{Message: err.Error()}
 			m.auths[id] = current
+			_ = m.persist(ctx, current)
+			snapshot = current.Clone()
 			if m.scheduler != nil {
-				m.scheduler.upsertAuth(current.Clone())
+				m.scheduler.upsertAuth(snapshot)
 			}
 		}
 		m.mu.Unlock()
+		if snapshot != nil {
+			m.hook.OnAuthUpdated(ctx, snapshot)
+		}
 		return
 	}
 	if updated == nil {

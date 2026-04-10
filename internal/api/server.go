@@ -328,6 +328,7 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
+	s.engine.GET("/management-codex-auth.html", s.mgmt.ServeCodexAuthPage)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -574,6 +575,12 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 
 		mgmt.GET("/copilot-quota", s.mgmt.GetCopilotQuota)
+		mgmt.GET("/codex-auth-quota", s.mgmt.GetCodexAuthQuota)
+		mgmt.GET("/codex-auth-quota/:auth_index", s.mgmt.GetCodexAuthQuotaByIndex)
+		mgmt.GET("/codex-auth-events", s.mgmt.GetCodexAuthEvents)
+		mgmt.GET("/codex-auth-usage", s.mgmt.GetCodexAuthUsage)
+		mgmt.GET("/codex-auth-config", s.mgmt.GetCodexAuthConfig)
+		mgmt.PUT("/codex-auth-config", s.mgmt.PutCodexAuthConfig)
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)

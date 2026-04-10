@@ -9,6 +9,7 @@ import (
 
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexquota"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -200,6 +201,18 @@ func (b *Builder) Build() (*Service, error) {
 	configaccess.Register(&b.cfg.SDKConfig)
 	accessManager.SetProviders(sdkaccess.RegisteredProviders())
 
+	codexquota.SetDefaultService(nil)
+	var quotaService *codexquota.Service
+	if b.cfg != nil && strings.TrimSpace(b.cfg.AuthDir) != "" {
+		var err error
+		quotaService, err = codexquota.NewService(b.cfg.AuthDir)
+		if err != nil {
+			return nil, fmt.Errorf("initialize codex quota service: %w", err)
+		}
+		codexquota.SetDefaultService(quotaService)
+		codexquota.RegisterDefaultUsagePlugin()
+	}
+
 	coreManager := b.coreManager
 	if coreManager == nil {
 		tokenStore := sdkAuth.GetTokenStore()
@@ -219,12 +232,20 @@ func (b *Builder) Build() (*Service, error) {
 			selector = &coreauth.RoundRobinSelector{}
 		}
 
-		coreManager = coreauth.NewManager(tokenStore, selector, nil)
+		var quotaHook coreauth.Hook
+		if quotaService != nil {
+			quotaHook = quotaService.Hook()
+		}
+		coreManager = coreauth.NewManager(tokenStore, selector, quotaHook)
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
+	if quotaService != nil {
+		quotaService.SetAuthManager(coreManager)
+		quotaService.SyncAuths(coreManager.List())
+	}
 
 	service := &Service{
 		cfg:            b.cfg,
