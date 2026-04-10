@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -89,7 +90,10 @@ type WatcherWrapper struct {
 	snapshotAuths         func() []*coreauth.Auth
 	setUpdateQueue        func(queue chan<- watcher.AuthUpdate)
 	dispatchRuntimeUpdate func(update watcher.AuthUpdate) bool
+	suppressAuthPath      func(path string, window time.Duration)
 	notifyTokenRefreshed  func(tokenID, accessToken, refreshToken, expiresAt string) // 方案 A: 后台刷新通知
+	reloadConfigFromDisk  func() error
+	reloadAuthFiles       func(forceAuthRefresh bool) error
 }
 
 // Start proxies to the underlying watcher Start implementation.
@@ -126,6 +130,15 @@ func (w *WatcherWrapper) DispatchRuntimeAuthUpdate(update watcher.AuthUpdate) bo
 	return w.dispatchRuntimeUpdate(update)
 }
 
+// SuppressAuthPath temporarily ignores watcher auth remove/rename events for a
+// path that was mutated internally, avoiding duplicate delete processing.
+func (w *WatcherWrapper) SuppressAuthPath(path string, window time.Duration) {
+	if w == nil || w.suppressAuthPath == nil {
+		return
+	}
+	w.suppressAuthPath(path, window)
+}
+
 // SetClients updates the watcher file-backed clients registry.
 // SetClients and SetAPIKeyClients removed; watcher manages its own caches
 
@@ -159,4 +172,20 @@ func (w *WatcherWrapper) NotifyTokenRefreshed(tokenID, accessToken, refreshToken
 		return
 	}
 	w.notifyTokenRefreshed(tokenID, accessToken, refreshToken, expiresAt)
+}
+
+// ReloadConfigFromDisk forces the watcher to reload config from the mirrored file on disk.
+func (w *WatcherWrapper) ReloadConfigFromDisk() error {
+	if w == nil || w.reloadConfigFromDisk == nil {
+		return nil
+	}
+	return w.reloadConfigFromDisk()
+}
+
+// ReloadAuthFiles rescans mirrored auth files and rebuilds runtime state.
+func (w *WatcherWrapper) ReloadAuthFiles(forceAuthRefresh bool) error {
+	if w == nil || w.reloadAuthFiles == nil {
+		return nil
+	}
+	return w.reloadAuthFiles(forceAuthRefresh)
 }

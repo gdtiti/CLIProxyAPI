@@ -129,6 +129,7 @@ func (rw *ResponseRewriter) Flush() {
 	}
 }
 
+// modelFieldPaths lists all JSON paths where model name may appear
 var modelFieldPaths = []string{"message.model", "model", "modelVersion", "response.model", "response.modelVersion"}
 
 // ensureAmpSignature injects empty signature fields into tool_use/thinking blocks

@@ -111,6 +111,8 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 		}
 	}
 
+	failedProjects := make([]string, 0)
+
 	if useGoogleOne {
 		log.Info("Google One mode: auto-discovering project...")
 		if errSetup := performGeminiCLISetup(ctx, httpClient, storage, ""); errSetup != nil {
@@ -147,9 +149,19 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 			log.Infof("Activating project %s", candidateID)
 			if errSetup := performGeminiCLISetup(ctx, httpClient, storage, candidateID); errSetup != nil {
 				if _, ok := errors.AsType[*projectSelectionRequiredError](errSetup); ok {
-					log.Error("Failed to start user onboarding: A project ID is required.")
-					showProjectSelectionHelp(storage.Email, projects)
-					return
+					if len(projectSelections) == 1 {
+						log.Error("Failed to start user onboarding: A project ID is required.")
+						showProjectSelectionHelp(storage.Email, projects)
+						return
+					}
+					log.Warnf("Skipping project %s: project selection required", candidateID)
+					failedProjects = append(failedProjects, candidateID)
+					continue
+				}
+				if len(projectSelections) > 1 {
+					log.Warnf("Skipping project %s due to setup error: %v", candidateID, errSetup)
+					failedProjects = append(failedProjects, candidateID)
+					continue
 				}
 				log.Errorf("Failed to complete user setup: %v", errSetup)
 				return
@@ -168,20 +180,50 @@ func DoLogin(cfg *config.Config, projectID string, options *LoginOptions) {
 		}
 	}
 
+	// Report failed projects if any
+	if len(failedProjects) > 0 {
+		log.Warnf("Failed to activate %d project(s): %s", len(failedProjects), strings.Join(failedProjects, ", "))
+	}
+
+	// Check if we have any successfully activated projects
+	if len(activatedProjects) == 0 {
+		log.Error("No projects were successfully activated; aborting login.")
+		return
+	}
+
 	storage.Auto = false
 	storage.ProjectID = strings.Join(activatedProjects, ",")
 
 	if !storage.Auto && !storage.Checked {
+		verifiedProjects := make([]string, 0, len(activatedProjects))
 		for _, pid := range activatedProjects {
 			isChecked, errCheck := checkCloudAPIIsEnabled(ctx, httpClient, pid)
 			if errCheck != nil {
+				if len(activatedProjects) > 1 {
+					log.Warnf("Skipping project %s: failed to check Cloud AI API: %v", pid, errCheck)
+					continue
+				}
 				log.Errorf("Failed to check if Cloud AI API is enabled for %s: %v", pid, errCheck)
 				return
 			}
 			if !isChecked {
+				if len(activatedProjects) > 1 {
+					log.Warnf("Skipping project %s: Cloud AI API is not enabled", pid)
+					continue
+				}
 				log.Errorf("Failed to check if Cloud AI API is enabled for project %s. If you encounter an error message, please create an issue.", pid)
 				return
 			}
+			verifiedProjects = append(verifiedProjects, pid)
+		}
+		if len(verifiedProjects) == 0 {
+			log.Error("No projects passed API verification; aborting login.")
+			return
+		}
+		if len(verifiedProjects) < len(activatedProjects) {
+			log.Warnf("Only %d of %d projects passed API verification", len(verifiedProjects), len(activatedProjects))
+			activatedProjects = verifiedProjects
+			storage.ProjectID = strings.Join(activatedProjects, ",")
 		}
 		storage.Checked = true
 	}

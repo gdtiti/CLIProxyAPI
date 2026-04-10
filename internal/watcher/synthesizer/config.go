@@ -341,6 +341,8 @@ func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreaut
 	for i := range cfg.KiroKey {
 		kk := cfg.KiroKey[i]
 		var accessToken, profileArn, refreshToken string
+		// IDC-specific fields from token file
+		var authMethod, clientID, clientSecret, startURL, region string
 
 		// Try to load from token file first
 		if kk.TokenFile != "" && kAuth != nil {
@@ -351,6 +353,12 @@ func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreaut
 				accessToken = tokenData.AccessToken
 				profileArn = tokenData.ProfileArn
 				refreshToken = tokenData.RefreshToken
+				// Load IDC-specific fields for proper endpoint selection
+				authMethod = tokenData.AuthMethod
+				clientID = tokenData.ClientID
+				clientSecret = tokenData.ClientSecret
+				startURL = tokenData.StartURL
+				region = tokenData.Region
 			}
 		}
 
@@ -370,6 +378,11 @@ func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreaut
 			continue
 		}
 
+		// Use config region if token file didn't have one
+		if region == "" && kk.Region != "" {
+			region = kk.Region
+		}
+
 		// profileArn is optional for AWS Builder ID users
 		id, token := idGen.Next("kiro:token", accessToken, profileArn)
 		attrs := map[string]string{
@@ -379,8 +392,8 @@ func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreaut
 		if profileArn != "" {
 			attrs["profile_arn"] = profileArn
 		}
-		if kk.Region != "" {
-			attrs["region"] = kk.Region
+		if region != "" {
+			attrs["region"] = region
 		}
 		if kk.AgentTaskType != "" {
 			attrs["agent_task_type"] = kk.AgentTaskType
@@ -406,11 +419,33 @@ func (s *ConfigSynthesizer) synthesizeKiroKeys(ctx *SynthesisContext) []*coreaut
 			UpdatedAt:  now,
 		}
 
+		// Initialize Metadata and populate with all token file fields
+		// This is CRITICAL for IDC enterprise accounts to use the correct endpoint
+		a.Metadata = make(map[string]any)
+		a.Metadata["type"] = "kiro"
+		a.Metadata["access_token"] = accessToken
 		if refreshToken != "" {
-			if a.Metadata == nil {
-				a.Metadata = make(map[string]any)
-			}
 			a.Metadata["refresh_token"] = refreshToken
+		}
+		if profileArn != "" {
+			a.Metadata["profile_arn"] = profileArn
+		}
+		// IDC-specific fields - CRITICAL for endpoint selection
+		if authMethod != "" {
+			a.Metadata["auth_method"] = authMethod
+			log.Debugf("kiro config[%d]: loaded auth_method=%s from token file", i, authMethod)
+		}
+		if clientID != "" {
+			a.Metadata["client_id"] = clientID
+		}
+		if clientSecret != "" {
+			a.Metadata["client_secret"] = clientSecret
+		}
+		if startURL != "" {
+			a.Metadata["start_url"] = startURL
+		}
+		if region != "" {
+			a.Metadata["region"] = region
 		}
 
 		out = append(out, a)

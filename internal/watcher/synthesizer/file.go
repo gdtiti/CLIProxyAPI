@@ -83,6 +83,9 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 	if provider == "gemini" {
 		provider = "gemini-cli"
 	}
+	if provider == "codex" {
+		enrichCodexMetadata(metadata)
+	}
 	label := provider
 	if email, _ := metadata["email"].(string); email != "" {
 		label = email
@@ -137,6 +140,7 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	coreauth.ApplyPersistedRuntimeState(a, now)
 	// Read priority from auth file.
 	if rawPriority, ok := metadata["priority"]; ok {
 		switch v := rawPriority.(type) {
@@ -246,6 +250,9 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			"virtual_parent_id": primary.ID,
 			"type":              metadata["type"],
 		}
+		if persisted, ok := metadata[coreauth.PersistedRuntimeStateMetadataKey]; ok {
+			metadataCopy[coreauth.PersistedRuntimeStateMetadataKey] = persisted
+		}
 		if v, ok := metadata["disable_cooling"]; ok {
 			metadataCopy["disable_cooling"] = v
 		} else if v, ok := metadata["disable-cooling"]; ok {
@@ -273,6 +280,7 @@ func SynthesizeGeminiVirtualAuths(primary *coreauth.Auth, metadata map[string]an
 			UpdatedAt:  primary.UpdatedAt,
 			Runtime:    geminicli.NewVirtualCredential(projectID, shared),
 		}
+		coreauth.ApplyPersistedRuntimeState(virtual, now)
 		virtuals = append(virtuals, virtual)
 	}
 	return virtuals
@@ -310,6 +318,23 @@ func buildGeminiVirtualID(baseID, projectID string) string {
 	}
 	replacer := strings.NewReplacer("/", "_", "\\", "_", " ", "_")
 	return fmt.Sprintf("%s::%s", baseID, replacer.Replace(project))
+}
+
+func enrichCodexMetadata(metadata map[string]any) {
+	if metadata == nil {
+		return
+	}
+	accountID, _ := metadata["account_id"].(string)
+	accountID = strings.TrimSpace(accountID)
+	if accountID != "" {
+		metadata["account_id"] = accountID
+		return
+	}
+	idToken, _ := metadata["id_token"].(string)
+	accountID = codex.AccountIDFromIDToken(idToken)
+	if accountID != "" {
+		metadata["account_id"] = accountID
+	}
 }
 
 // extractExcludedModelsFromMetadata reads per-account excluded models from the OAuth JSON metadata.

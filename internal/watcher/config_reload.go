@@ -40,18 +40,42 @@ func (w *Watcher) scheduleConfigReload() {
 	})
 }
 
-func (w *Watcher) reloadConfigIfChanged() {
+func (w *Watcher) readConfigHash() (string, error) {
 	data, err := os.ReadFile(w.configPath)
 	if err != nil {
-		log.Errorf("failed to read config file for hash check: %v", err)
-		return
+		return "", err
 	}
 	if len(data) == 0 {
-		log.Debugf("ignoring empty config file write event")
-		return
+		return "", nil
 	}
 	sum := sha256.Sum256(data)
-	newHash := hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (w *Watcher) syncConfigHashFromDisk() {
+	newHash, err := w.readConfigHash()
+	if err != nil {
+		log.WithError(err).Debug("failed to sync config hash from disk")
+		return
+	}
+	if newHash == "" {
+		return
+	}
+	w.clientsMutex.Lock()
+	w.lastConfigHash = newHash
+	w.clientsMutex.Unlock()
+}
+
+func (w *Watcher) reloadConfigIfChanged() bool {
+	newHash, err := w.readConfigHash()
+	if err != nil {
+		log.Errorf("failed to read config file for hash check: %v", err)
+		return false
+	}
+	if newHash == "" {
+		log.Debugf("ignoring empty config file write event")
+		return false
+	}
 
 	w.clientsMutex.RLock()
 	currentHash := w.lastConfigHash
@@ -59,7 +83,7 @@ func (w *Watcher) reloadConfigIfChanged() {
 
 	if currentHash != "" && currentHash == newHash {
 		log.Debugf("config file content unchanged (hash match), skipping reload")
-		return
+		return false
 	}
 	log.Infof("config file changed, reloading: %s", w.configPath)
 	if w.reloadConfig() {
@@ -74,7 +98,9 @@ func (w *Watcher) reloadConfigIfChanged() {
 		w.lastConfigHash = finalHash
 		w.clientsMutex.Unlock()
 		w.persistConfigAsync()
+		return true
 	}
+	return false
 }
 
 func (w *Watcher) reloadConfig() bool {

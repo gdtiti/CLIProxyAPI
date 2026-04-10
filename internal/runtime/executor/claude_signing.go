@@ -21,8 +21,19 @@ func signAnthropicMessagesBody(body []byte) []byte {
 	if !strings.HasPrefix(billingHeader, "x-anthropic-billing-header:") {
 		return body
 	}
+
 	if !claudeBillingHeaderCCHPattern.MatchString(billingHeader) {
-		return body
+		trimmed := strings.TrimSpace(billingHeader)
+		trimmed = strings.TrimRight(trimmed, ";")
+		if trimmed == "" {
+			return body
+		}
+		billingHeader = trimmed + "; cch=00000;"
+		updatedBody, err := sjson.SetBytes(body, "system.0.text", billingHeader)
+		if err != nil {
+			return body
+		}
+		body = updatedBody
 	}
 
 	unsignedBillingHeader := claudeBillingHeaderCCHPattern.ReplaceAllString(billingHeader, "cch=00000;")

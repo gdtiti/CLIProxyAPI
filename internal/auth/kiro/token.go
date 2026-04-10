@@ -35,6 +35,8 @@ type KiroTokenStorage struct {
 	StartURL string `json:"start_url,omitempty"`
 	// Email is the user's email address
 	Email string `json:"email,omitempty"`
+	// Fingerprint stores the device fingerprint for IDC auth
+	Fingerprint *IDCFingerprint `json:"fingerprint,omitempty"`
 }
 
 // SaveTokenToFile persists the token storage to the specified file path.
@@ -85,5 +87,6 @@ func (s *KiroTokenStorage) ToTokenData() *KiroTokenData {
 		Region:       s.Region,
 		StartURL:     s.StartURL,
 		Email:        s.Email,
+		Fingerprint:  s.Fingerprint,
 	}
 }

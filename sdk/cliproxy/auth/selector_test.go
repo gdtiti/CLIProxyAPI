@@ -311,6 +311,62 @@ func TestIsAuthBlockedForModel_UnavailableWithoutNextRetryIsNotBlocked(t *testin
 	}
 }
 
+func TestIsAuthBlockedForModel_TemporaryDisableUsesCooldown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	until := now.Add(5 * time.Hour)
+	auth := &Auth{
+		ID:             "codex-temp-disabled",
+		Status:         StatusDisabled,
+		Unavailable:    true,
+		NextRetryAfter: until,
+		Metadata: map[string]any{
+			temporaryDisableUntilMetadataKey:  until.UTC().Format(time.RFC3339Nano),
+			temporaryDisableReasonMetadataKey: temporaryDisableReasonCodex429,
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", now)
+	if !blocked {
+		t.Fatalf("blocked = false, want true")
+	}
+	if reason != blockReasonCooldown {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonCooldown)
+	}
+	if !next.Equal(until.UTC()) {
+		t.Fatalf("next = %v, want %v", next, until.UTC())
+	}
+}
+
+func TestIsAuthBlockedForModel_ExpiredTemporaryDisableDoesNotBlock(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	until := now.Add(-1 * time.Minute)
+	auth := &Auth{
+		ID:             "codex-temp-disabled-expired",
+		Status:         StatusDisabled,
+		Unavailable:    true,
+		NextRetryAfter: until,
+		Metadata: map[string]any{
+			temporaryDisableUntilMetadataKey:  until.UTC().Format(time.RFC3339Nano),
+			temporaryDisableReasonMetadataKey: temporaryDisableReasonCodex429,
+		},
+	}
+
+	blocked, reason, next := isAuthBlockedForModel(auth, "gpt-5", now)
+	if blocked {
+		t.Fatalf("blocked = true, want false")
+	}
+	if reason != blockReasonNone {
+		t.Fatalf("reason = %v, want %v", reason, blockReasonNone)
+	}
+	if !next.IsZero() {
+		t.Fatalf("next = %v, want zero", next)
+	}
+}
+
 func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testing.T) {
 	t.Parallel()
 
@@ -340,6 +396,43 @@ func TestFillFirstSelectorPick_ThinkingSuffixFallsBackToBaseModelState(t *testin
 	}
 
 	got, err := selector.Pick(context.Background(), "mixed", requestedModel, cliproxyexecutor.Options{}, []*Auth{high, low})
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil {
+		t.Fatalf("Pick() auth = nil")
+	}
+	if got.ID != "low" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got.ID, "low")
+	}
+}
+
+func TestFillFirstSelectorPick_GlobalModelStateBlocksAllModels(t *testing.T) {
+	t.Parallel()
+
+	selector := &FillFirstSelector{}
+	now := time.Now()
+
+	high := &Auth{
+		ID:         "high",
+		Attributes: map[string]string{"priority": "10"},
+		ModelStates: map[string]*ModelState{
+			globalModelStateKey: {
+				Status:         StatusActive,
+				Unavailable:    true,
+				NextRetryAfter: now.Add(30 * time.Minute),
+				Quota: QuotaState{
+					Exceeded: true,
+				},
+			},
+		},
+	}
+	low := &Auth{
+		ID:         "low",
+		Attributes: map[string]string{"priority": "0"},
+	}
+
+	got, err := selector.Pick(context.Background(), "mixed", "any-model", cliproxyexecutor.Options{}, []*Auth{high, low})
 	if err != nil {
 		t.Fatalf("Pick() error = %v", err)
 	}
@@ -525,5 +618,65 @@ func TestRoundRobinSelectorPick_MixedVirtualAndNonVirtualFallsBackToFlat(t *test
 		if got.ID != expectedID {
 			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, expectedID)
 		}
+	}
+}
+
+func TestRoundRobinSelectorPick_EvenRoundRobinIgnoresSuccessScoreByDefault(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{{ID: "a"}, {ID: "b"}}
+
+	for i := 0; i < 16; i++ {
+		selector.ObserveResult(Result{AuthID: "a", Success: false, Error: &Error{HTTPStatus: 500, Message: "boom"}})
+		selector.ObserveResult(Result{AuthID: "b", Success: true})
+	}
+
+	counts := map[string]int{"a": 0, "b": 0}
+	for i := 0; i < 40; i++ {
+		picked, err := selector.Pick(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if picked == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		counts[picked.ID]++
+	}
+
+	if counts["a"] != counts["b"] {
+		t.Fatalf("expected even round-robin distribution, counts=%v", counts)
+	}
+}
+
+func TestRoundRobinSelectorPick_EvenRoundRobinTouchesEveryAccount(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+
+	for i := 0; i < 24; i++ {
+		selector.ObserveResult(Result{AuthID: "a", Success: true})
+		selector.ObserveResult(Result{AuthID: "b", Success: false, Error: &Error{HTTPStatus: 500, Message: "boom"}})
+		selector.ObserveResult(Result{AuthID: "c", Success: false, Error: &Error{HTTPStatus: 500, Message: "boom"}})
+	}
+
+	counts := map[string]int{"a": 0, "b": 0, "c": 0}
+	for i := 0; i < 60; i++ {
+		picked, err := selector.Pick(context.Background(), "gemini", "test-model", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if picked == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		counts[picked.ID]++
+	}
+
+	if counts["a"] == 0 || counts["b"] == 0 || counts["c"] == 0 {
+		t.Fatalf("expected every account to be selected, counts=%v", counts)
+	}
+	if counts["a"] != counts["b"] || counts["b"] != counts["c"] {
+		t.Fatalf("expected even round-robin distribution, counts=%v", counts)
 	}
 }

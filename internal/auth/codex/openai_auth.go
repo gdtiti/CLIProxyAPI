@@ -7,6 +7,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
+
+var ErrRefreshTokenReused = errors.New("codex refresh token reused")
 
 // OAuth configuration constants for OpenAI Codex
 const (
@@ -202,7 +205,11 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, refreshToken string) (*Co
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, string(body))
+		bodyText := string(body)
+		if resp.StatusCode == http.StatusUnauthorized && strings.Contains(bodyText, "refresh_token_reused") {
+			return nil, fmt.Errorf("%w: token refresh failed with status %d: %s", ErrRefreshTokenReused, resp.StatusCode, bodyText)
+		}
+		return nil, fmt.Errorf("token refresh failed with status %d: %s", resp.StatusCode, bodyText)
 	}
 
 	var tokenResp struct {
@@ -276,7 +283,7 @@ func (o *CodexAuth) RefreshTokensWithRetry(ctx context.Context, refreshToken str
 		if err == nil {
 			return tokenData, nil
 		}
-		if isNonRetryableRefreshErr(err) {
+		if errors.Is(err, ErrRefreshTokenReused) || isNonRetryableRefreshErr(err) {
 			log.Warnf("Token refresh attempt %d failed with non-retryable error: %v", attempt+1, err)
 			return nil, err
 		}

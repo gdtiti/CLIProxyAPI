@@ -29,11 +29,9 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
 )
 
 const (
-	codeAssistEndpoint      = "https://cloudcode-pa.googleapis.com"
 	codeAssistVersion       = "v1internal"
 	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
 	geminiOAuthClientSecret = "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"
@@ -182,6 +180,7 @@ func (e *GeminiCLIExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
+		codeAssistEndpoint := e.cfg.GeminiCLI.GetCodeAssistEndpoint()
 		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, action)
 		if opts.Alt != "" && action != "countTokens" {
 			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
@@ -326,6 +325,7 @@ func (e *GeminiCLIExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
+		codeAssistEndpoint := e.cfg.GeminiCLI.GetCodeAssistEndpoint()
 		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "streamGenerateContent")
 		if opts.Alt == "" {
 			url = url + "?alt=sse"
@@ -511,7 +511,8 @@ func (e *GeminiCLIExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.
 		}
 		updateGeminiCLITokenMetadata(auth, baseTokenData, tok)
 
-		url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "countTokens")
+		codeAssistEndpoint := e.cfg.GeminiCLI.GetCodeAssistEndpoint()
+	url := fmt.Sprintf("%s/%s:%s", codeAssistEndpoint, codeAssistVersion, "countTokens")
 		if opts.Alt != "" {
 			url = url + fmt.Sprintf("?$alt=%s", opts.Alt)
 		}
@@ -614,11 +615,18 @@ func prepareGeminiCLITokenSource(ctx context.Context, cfg *config.Config, auth *
 		}
 	}
 
+	// 使用配置的镜像端点
+	oauthEndpoint := cfg.GeminiCLI.GetOAuthEndpoint()
+	tokenURL := cfg.GeminiCLI.GetTokenURL()
+
 	conf := &oauth2.Config{
 		ClientID:     geminiOAuthClientID,
 		ClientSecret: geminiOAuthClientSecret,
 		Scopes:       geminiOAuthScopes,
-		Endpoint:     google.Endpoint,
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  fmt.Sprintf("%s/auth", strings.TrimSuffix(oauthEndpoint, "/")),
+			TokenURL: tokenURL,
+		},
 	}
 
 	ctxToken := ctx

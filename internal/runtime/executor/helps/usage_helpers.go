@@ -200,6 +200,288 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
+type CodexQuotaRetryDecision struct {
+	RetryAfter *time.Duration
+	Window     string
+}
+
+func ParseCodexUsageLimitRetryAfter(body []byte, now time.Time) *time.Duration {
+	return parseCodexUsageLimitRetryAfter(body, now)
+}
+
+func parseCodexUsageLimitRetryAfter(body []byte, now time.Time) *time.Duration {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return nil
+	}
+	root := gjson.ParseBytes(body)
+	if d := parseUsageLimitRetryAfterFromNode(root, now); d != nil {
+		return d
+	}
+	for _, key := range [...]string{"status_message", "message", "error.message"} {
+		nestedRaw := strings.TrimSpace(root.Get(key).String())
+		if nestedRaw == "" || !gjson.Valid(nestedRaw) {
+			continue
+		}
+		nested := gjson.Parse(nestedRaw)
+		if d := parseUsageLimitRetryAfterFromNode(nested, now); d != nil {
+			return d
+		}
+	}
+	return nil
+}
+
+func IsCodexUsageLimitReached(body []byte) bool {
+	return isCodexUsageLimitReached(body)
+}
+
+func isCodexUsageLimitReached(body []byte) bool {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return false
+	}
+	root := gjson.ParseBytes(body)
+	if isUsageLimitNode(root) {
+		return true
+	}
+	for _, key := range [...]string{"status_message", "message", "error.message"} {
+		nestedRaw := strings.TrimSpace(root.Get(key).String())
+		if nestedRaw == "" || !gjson.Valid(nestedRaw) {
+			continue
+		}
+		if isUsageLimitNode(gjson.Parse(nestedRaw)) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCodexQuotaRetryAfter(body []byte, now time.Time) *time.Duration {
+	decision := parseCodexQuotaRetryDecision(body, now)
+	return decision.RetryAfter
+}
+
+type codexQuotaRetryDecision struct {
+	RetryAfter *time.Duration
+	Window     string
+}
+
+type codexQuotaRetryCandidate struct {
+	Duration      time.Duration
+	Window        string
+	WindowSeconds int64
+}
+
+func ParseCodexQuotaRetryDecision(body []byte, now time.Time) CodexQuotaRetryDecision {
+	decision := parseCodexQuotaRetryDecision(body, now)
+	return CodexQuotaRetryDecision{
+		RetryAfter: decision.RetryAfter,
+		Window:     decision.Window,
+	}
+}
+
+func parseCodexQuotaRetryDecision(body []byte, now time.Time) codexQuotaRetryDecision {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return codexQuotaRetryDecision{}
+	}
+	root := gjson.ParseBytes(body)
+	candidates := collectCodexQuotaRetryCandidates(root.Get("rate_limit"), now)
+	candidates = append(candidates, collectCodexQuotaRetryCandidates(root.Get("rateLimit"), now)...)
+	candidates = append(candidates, collectCodexQuotaRetryCandidates(root.Get("code_review_rate_limit"), now)...)
+	candidates = append(candidates, collectCodexQuotaRetryCandidates(root.Get("codeReviewRateLimit"), now)...)
+	if len(candidates) == 0 {
+		return codexQuotaRetryDecision{}
+	}
+	best := candidates[0]
+	for i := 1; i < len(candidates); i++ {
+		if candidates[i].Duration > best.Duration {
+			best = candidates[i]
+			continue
+		}
+		if candidates[i].Duration == best.Duration && candidates[i].WindowSeconds > best.WindowSeconds {
+			best = candidates[i]
+		}
+	}
+	if best.Duration < 0 {
+		best.Duration = 0
+	}
+	retryAfter := best.Duration
+	return codexQuotaRetryDecision{RetryAfter: &retryAfter, Window: best.Window}
+}
+
+func collectCodexQuotaRetryCandidates(limitNode gjson.Result, now time.Time) []codexQuotaRetryCandidate {
+	if !limitNode.Exists() {
+		return nil
+	}
+	limited := false
+	if allowed := limitNode.Get("allowed"); allowed.Exists() && !allowed.Bool() {
+		limited = true
+	}
+	if reached := limitNode.Get("limit_reached"); reached.Exists() && reached.Bool() {
+		limited = true
+	}
+	if reached := limitNode.Get("limitReached"); reached.Exists() && reached.Bool() {
+		limited = true
+	}
+	if !limited {
+		return nil
+	}
+
+	windows := []gjson.Result{
+		limitNode.Get("primary_window"),
+		limitNode.Get("primaryWindow"),
+		limitNode.Get("secondary_window"),
+		limitNode.Get("secondaryWindow"),
+	}
+	candidates := make([]codexQuotaRetryCandidate, 0, len(windows))
+	for i := 0; i < len(windows); i++ {
+		window := windows[i]
+		if !window.Exists() {
+			continue
+		}
+		usedPercent := codexWindowUsedPercent(window)
+		if usedPercent < 99.5 {
+			continue
+		}
+		if candidate, ok := codexWindowRetryCandidate(window, now); ok {
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func codexWindowUsedPercent(window gjson.Result) float64 {
+	for _, path := range [...]string{"used_percent", "usedPercent"} {
+		value := window.Get(path)
+		if !value.Exists() {
+			continue
+		}
+		if value.Type == gjson.String {
+			parsed := strings.TrimSpace(value.String())
+			if parsed == "" {
+				continue
+			}
+			if parsedValue := gjson.Parse(parsed); parsedValue.Exists() {
+				return parsedValue.Float()
+			}
+		}
+		return value.Float()
+	}
+	return 0
+}
+
+func codexWindowRetryCandidate(window gjson.Result, now time.Time) (codexQuotaRetryCandidate, bool) {
+	windowSeconds := int64(0)
+	for _, path := range [...]string{"limit_window_seconds", "limitWindowSeconds"} {
+		node := window.Get(path)
+		if !node.Exists() {
+			continue
+		}
+		windowSeconds = node.Int()
+		if windowSeconds > 0 {
+			break
+		}
+	}
+	candidate := codexQuotaRetryCandidate{WindowSeconds: windowSeconds, Window: codexWindowName(windowSeconds)}
+	for _, path := range [...]string{"reset_after_seconds", "resetAfterSeconds"} {
+		secondsNode := window.Get(path)
+		if !secondsNode.Exists() {
+			continue
+		}
+		seconds := secondsNode.Int()
+		if seconds <= 0 {
+			continue
+		}
+		candidate.Duration = time.Duration(seconds) * time.Second
+		return candidate, true
+	}
+	for _, path := range [...]string{"reset_at", "resetAt"} {
+		tsNode := window.Get(path)
+		if !tsNode.Exists() {
+			continue
+		}
+		raw := tsNode.Int()
+		if raw <= 0 {
+			continue
+		}
+		resetAt := time.Unix(raw, 0)
+		if raw > 1_000_000_000_000 {
+			resetAt = time.UnixMilli(raw)
+		}
+		d := resetAt.Sub(now)
+		if d < 0 {
+			d = 0
+		}
+		candidate.Duration = d
+		return candidate, true
+	}
+	return codexQuotaRetryCandidate{}, false
+}
+
+func codexWindowName(limitWindowSeconds int64) string {
+	switch limitWindowSeconds {
+	case 18_000:
+		return "five_hour"
+	case 604_800:
+		return "weekly"
+	default:
+		return ""
+	}
+}
+
+func parseUsageLimitRetryAfterFromNode(node gjson.Result, now time.Time) *time.Duration {
+	if !node.Exists() {
+		return nil
+	}
+	if !isUsageLimitNode(node) {
+		return nil
+	}
+
+	for _, path := range [...]string{"error.resets_in_seconds", "resets_in_seconds", "error.reset_after_seconds", "reset_after_seconds"} {
+		secNode := node.Get(path)
+		if !secNode.Exists() {
+			continue
+		}
+		seconds := secNode.Int()
+		if seconds <= 0 {
+			continue
+		}
+		d := time.Duration(seconds) * time.Second
+		return &d
+	}
+
+	for _, path := range [...]string{"error.resets_at", "resets_at", "error.reset_at", "reset_at"} {
+		tsNode := node.Get(path)
+		if !tsNode.Exists() {
+			continue
+		}
+		raw := tsNode.Int()
+		if raw <= 0 {
+			continue
+		}
+		resetAt := time.Unix(raw, 0)
+		if raw > 1_000_000_000_000 {
+			resetAt = time.UnixMilli(raw)
+		}
+		d := resetAt.Sub(now)
+		if d < 0 {
+			d = 0
+		}
+		return &d
+	}
+
+	return nil
+}
+
+func isUsageLimitNode(node gjson.Result) bool {
+	if !node.Exists() {
+		return false
+	}
+	typeNode := strings.TrimSpace(node.Get("error.type").String())
+	if typeNode == "" {
+		typeNode = strings.TrimSpace(node.Get("type").String())
+	}
+	return strings.EqualFold(typeNode, "usage_limit_reached")
+}
+
 func ParseOpenAIUsage(data []byte) usage.Detail {
 	usageNode := gjson.ParseBytes(data).Get("usage")
 	if !usageNode.Exists() {

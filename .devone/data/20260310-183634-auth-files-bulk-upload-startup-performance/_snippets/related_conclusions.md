@@ -1,0 +1,6 @@
+﻿- 结论 1: 当前仅支持单文件上传，批量能力仅覆盖 `excluded_models` 字段更新。
+- 结论 2: 启动阶段存在多次全量扫描/解析 authDir 的重复 IO。
+- 结论 3: 启动慢的主要来源是同步型外部依赖与全量扫描（store 同步、模型拉取、管理面更新、Kiro 刷新、usage 初始化）。
+- 结论 4: 优化方向以“分阶段启动 + 异步化 + 增量化 + 可配置跳过”优先。
+- 结论 5: reload-from-store 依赖 store 能力与 reload hook，非全局可用。
+- 结论 6: 各 provider 冷却来源差异明显，Codex 依赖 usage API 精确冷却，部分 provider 仅能退避。

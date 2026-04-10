@@ -7,12 +7,16 @@ package config
 import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 
 type SDKConfig = internalconfig.SDKConfig
+type AccessConfig = internalconfig.AccessConfig
+type AccessProvider = internalconfig.AccessProvider
 
 type Config = internalconfig.Config
 
 type StreamingConfig = internalconfig.StreamingConfig
 type TLSConfig = internalconfig.TLSConfig
 type RemoteManagement = internalconfig.RemoteManagement
+type AuthRuntimeConfig = internalconfig.AuthRuntimeConfig
+type AuthMaintenanceConfig = internalconfig.AuthMaintenanceConfig
 type AmpCode = internalconfig.AmpCode
 type OAuthModelAlias = internalconfig.OAuthModelAlias
 type PayloadConfig = internalconfig.PayloadConfig
@@ -32,8 +36,14 @@ type OpenAICompatibilityModel = internalconfig.OpenAICompatibilityModel
 type TLS = internalconfig.TLSConfig
 
 const (
-	DefaultPanelGitHubRepository = internalconfig.DefaultPanelGitHubRepository
+	AccessProviderTypeConfigAPIKey = internalconfig.AccessProviderTypeConfigAPIKey
+	DefaultAccessProviderName      = internalconfig.DefaultAccessProviderName
+	DefaultPanelGitHubRepository   = internalconfig.DefaultPanelGitHubRepository
 )
+
+func MakeInlineAPIKeyProvider(keys []string) *AccessProvider {
+	return internalconfig.MakeInlineAPIKeyProvider(keys)
+}
 
 func LoadConfig(configFile string) (*Config, error) { return internalconfig.LoadConfig(configFile) }
 

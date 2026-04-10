@@ -1,0 +1,10 @@
+﻿- 入口模块: `internal/api/handlers/management/auth_files.go`（新增批量 handler），`internal/api/server.go`（新增路由）。
+- 关键调用链: 批量上传 -> staging 校验 -> 写入 authDir -> 批量持久化 store（可选）-> 统一 reload（可选）。
+- 数据流: 请求包 -> 临时目录 -> 校验通过文件集 -> 目标 authDir -> store。
+- 错误处理: 支持全有或全无与允许部分成功两种策略；无论哪种都返回逐文件结果清单。
+- 配置变更: 最大文件数/包体大小/原子性策略/是否自动 reload。
+- 自动处置: 401 触发阈值为“10 分钟内连续 3 次”，且需可配置；Gemini 先删虚拟凭证，全部虚拟凭证清空后才删真实凭证；配额为 0 且需冷却时自动禁用，冷却时间以配额查询返回为准，冷却到期自动恢复。
+- 配额/冷却差异: Codex 429 -> usage API 解析 reset_after_seconds/reset_at（rate_limit/code_review_rate_limit，窗口 five_hour/weekly）；Qwen quota 403->429 冷却至北京时间次日 00:00；Gemini CLI / Antigravity 解析 RetryInfo.retryDelay 或 ErrorInfo.metadata.quotaResetDelay；Gemini/Gemini Vertex/Claude/GitHub Copilot/Kimi/Kilo/iFlow/AIStudio/OpenAICompat/Kiro 未检索到 Retry-After 解析，走 conductor 指数退避。
+- Codex 认证文件要求: 需包含 access_token 与 account_id；account_id 可由 jwt_parser 的 chatgpt_account_id 提取；缺失时冷却刷新退化为错误体解析/退避。
+- 优先实现顺序: 先 Codex 认证文件配合 + 冷却刷新，再扩展其他 provider 的细化策略。
+- 启动优化切点: store Bootstrap/同步、watcher 初次全量扫描、模型列表拉取、管理面更新、Kiro 刷新、usage 初始化。

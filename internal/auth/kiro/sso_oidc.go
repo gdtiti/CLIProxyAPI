@@ -461,6 +461,10 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 
 			expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 
+			// Generate IDC fingerprint for consistent User-Agent across requests
+			fingerprint := GenerateIDCFingerprint()
+			log.Debugf("kiro: generated IDC fingerprint (OS: %s/%s)", fingerprint.OSType, fingerprint.OSVersion)
+
 			return &KiroTokenData{
 				AccessToken:  tokenResp.AccessToken,
 				RefreshToken: tokenResp.RefreshToken,
@@ -473,6 +477,7 @@ func (c *SSOOIDCClient) LoginWithIDC(ctx context.Context, startURL, region strin
 				Email:        email,
 				StartURL:     startURL,
 				Region:       region,
+				Fingerprint:  fingerprint,
 			}, nil
 		}
 	}

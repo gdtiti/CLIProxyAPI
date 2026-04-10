@@ -118,6 +118,15 @@ func (a *KiroAuthenticator) createAuthRecord(tokenData *kiroauth.KiroTokenData, 
 	if tokenData.Region != "" {
 		metadata["region"] = tokenData.Region
 	}
+	// Add fingerprint for IDC auth (persisted for consistent User-Agent)
+	if tokenData.Fingerprint != nil {
+		metadata["fingerprint"] = map[string]interface{}{
+			"osType":      tokenData.Fingerprint.OSType,
+			"osVersion":   tokenData.Fingerprint.OSVersion,
+			"sdkVersion":  tokenData.Fingerprint.SDKVersion,
+			"rustVersion": tokenData.Fingerprint.RustVersion,
+		}
+	}
 
 	attributes := map[string]string{
 		"profile_arn": tokenData.ProfileArn,

@@ -1,0 +1,29 @@
+# 测试配置文件 - Codex Plus/Free 套餐区分
+port: 8317
+auth-dir: "auths"
+api-keys:
+  - "test-key-123"
+
+# Codex API keys with plan types
+codex-api-key:
+  - api-key: "sk-plus-example"
+    prefix: "plus"
+    base-url: "https://api.codex-plus.com"
+    plan-type: "plus"
+    excluded-models:
+      - "gpt-4-mini"
+      - "*-free"
+  - api-key: "sk-free-example"
+    prefix: "free"
+    base-url: "https://api.codex-free.com"
+    plan-type: "free"
+    excluded-models:
+      - "gpt-5"
+      - "gpt-4-turbo"
+      - "*-premium"
+  - api-key: "sk-general-example"
+    prefix: "general"
+    base-url: "https://api.codex.com"
+    # plan-type 留空表示通用凭证
+    excluded-models:
+      - "gpt-experimental"

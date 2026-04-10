@@ -4,12 +4,13 @@
 package cliproxy
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexquota"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/audit"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -49,6 +50,28 @@ type Builder struct {
 
 	// serverOptions contains additional server configuration options.
 	serverOptions []api.ServerOption
+}
+
+type requestAuditHook struct {
+	coreauth.NoopHook
+	sink *audit.Hook
+}
+
+func (h *requestAuditHook) OnResult(ctx context.Context, result coreauth.Result) {
+	if h == nil || h.sink == nil {
+		return
+	}
+	resultInfo := audit.ResultInfo{
+		Provider: strings.TrimSpace(result.Provider),
+		Model:    strings.TrimSpace(result.Model),
+		Success:  result.Success,
+		AuthID:   strings.TrimSpace(result.AuthID),
+	}
+	if result.Error != nil {
+		resultInfo.StatusCode = result.Error.StatusCode()
+		resultInfo.ErrorMessage = strings.TrimSpace(result.Error.Message)
+	}
+	h.sink.Emit(ctx, resultInfo)
 }
 
 // Hooks allows callers to plug into service lifecycle stages.
@@ -198,8 +221,11 @@ func (b *Builder) Build() (*Service, error) {
 		accessManager = sdkaccess.NewManager()
 	}
 
-	configaccess.Register(&b.cfg.SDKConfig)
-	accessManager.SetProviders(sdkaccess.RegisteredProviders())
+	providers, err := sdkaccess.BuildProviders(&b.cfg.SDKConfig)
+	if err != nil {
+		return nil, err
+	}
+	accessManager.SetProviders(providers)
 
 	codexquota.SetDefaultService(nil)
 	var quotaService *codexquota.Service
@@ -228,15 +254,22 @@ func (b *Builder) Build() (*Service, error) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			selector = &coreauth.FillFirstSelector{}
+		case "success-rate", "successrate", "sr":
+			selector = coreauth.NewSuccessRateSelector(b.cfg.Routing.SuccessRate.HalfLifeSeconds, b.cfg.Routing.SuccessRate.ExploreRate)
+		case "simhash", "sh":
+			selector = coreauth.NewSimHashSelector(b.cfg.Routing.SimHash)
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
 
-		var quotaHook coreauth.Hook
-		if quotaService != nil {
-			quotaHook = quotaService.Hook()
+		var hooks []coreauth.Hook
+		if auditHook := audit.NewHook(&b.cfg.RequestAudit); auditHook != nil {
+			hooks = append(hooks, &requestAuditHook{sink: auditHook})
 		}
-		coreManager = coreauth.NewManager(tokenStore, selector, quotaHook)
+		if quotaService != nil {
+			hooks = append(hooks, quotaService.Hook())
+		}
+		coreManager = coreauth.NewManager(tokenStore, selector, coreauth.CombineHooks(hooks...))
 	}
 	// Attach a default RoundTripper provider so providers can opt-in per-auth transports.
 	coreManager.SetRoundTripperProvider(newDefaultRoundTripperProvider())

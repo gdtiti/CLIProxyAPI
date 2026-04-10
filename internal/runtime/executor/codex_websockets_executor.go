@@ -155,7 +155,7 @@ func (e *CodexWebsocketsExecutor) Execute(ctx context.Context, auth *cliproxyaut
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if opts.Alt == "responses/compact" {
+	if shouldUseCodexCompactEndpoint(e.cfg, opts.Alt) {
 		return e.CodexExecutor.executeCompact(ctx, auth, req, opts)
 	}
 
@@ -821,36 +821,87 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 		ginHeaders = ginCtx.Request.Header.Clone()
 	}
 
+	profile := buildCodexSignatureProfile(cfg, auth)
 	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
-	misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
-	misc.EnsureHeader(headers, ginHeaders, "Version", "")
+	if profile.Strict() && profile.BetaFeatures != "" {
+		headers.Set("x-codex-beta-features", profile.BetaFeatures)
+	} else {
+		ensureHeaderWithPriority(headers, ginHeaders, "x-codex-beta-features", cfgBetaFeatures, "")
+	}
+	misc.EnsureHeader(headers, ginHeaders, "session_id", uuid.NewString())
+	turnMetadataValue := ""
+	stableTurnID := ""
+	if profile.Strict() && profile.StableTurnID {
+		stableTurnID = codexStableDerivedID("turn-id", headers, ginHeaders)
+		turnMetadataValue = codexTurnMetadataValue(stableTurnID)
+	} else if profile.Strict() && profile.ForceTurnMetadata {
+		turnMetadataValue = profile.TurnMetadataValue
+	}
+	requestIDValue := uuid.NewString()
+	if profile.Strict() && profile.StableRequestID {
+		requestIDValue = codexStableDerivedID("request-id", headers, ginHeaders)
+	}
+	turnStateValue := profile.TurnStateValue
+	if profile.Strict() && profile.ForceTurnState && (profile.StableTurnID || profile.StableRequestID) {
+		requestIDForState := ""
+		if profile.StableRequestID {
+			requestIDForState = requestIDValue
+		}
+		turnStateValue = codexTurnStateValue(stableTurnID, requestIDForState)
+	}
+	if profile.Strict() && profile.ForceTurnState {
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", turnStateValue)
+	} else {
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-state", "")
+	}
+	if profile.Strict() && (profile.ForceTurnMetadata || profile.StableTurnID) {
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", turnMetadataValue)
+	} else {
+		misc.EnsureHeader(headers, ginHeaders, "x-codex-turn-metadata", "")
+	}
+	if profile.MimicEnabled() {
+		misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", requestIDValue)
+	} else {
+		misc.EnsureHeader(headers, ginHeaders, "x-client-request-id", "")
+	}
+	if profile.Strict() && profile.IncludeTimingMetrics {
+		misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", profile.TimingMetricsValue)
+	} else {
+		misc.EnsureHeader(headers, ginHeaders, "x-responsesapi-include-timing-metrics", "")
+	}
+	if profile.Strict() && profile.Version != "" {
+		headers.Set("Version", profile.Version)
+	} else {
+		misc.EnsureHeader(headers, ginHeaders, "Version", profile.Version)
+	}
 
 	betaHeader := strings.TrimSpace(headers.Get("OpenAI-Beta"))
 	if betaHeader == "" && ginHeaders != nil {
 		betaHeader = strings.TrimSpace(ginHeaders.Get("OpenAI-Beta"))
 	}
-	if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
+	if profile.Strict() {
+		betaHeader = profile.OpenAIBeta
+	} else if betaHeader == "" || !strings.Contains(betaHeader, "responses_websockets=") {
 		betaHeader = codexResponsesWebsocketBetaHeaderValue
 	}
 	headers.Set("OpenAI-Beta", betaHeader)
-	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-	}
-	headers.Del("User-Agent")
-
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
+	if profile.Strict() {
+		headers.Set("User-Agent", profile.UserAgent)
+	} else {
+		if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
+			misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
 		}
+		headers.Del("User-Agent")
 	}
+
+	isAPIKey := profile.IsAPIKey
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		headers.Set("Originator", originator)
-	} else if !isAPIKey {
+		if profile.Strict() && profile.Originator != "" {
+			headers.Set("Originator", profile.Originator)
+		} else {
+			headers.Set("Originator", originator)
+		}
+	} else if profile.Originator != "" && !isAPIKey {
 		headers.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
@@ -882,6 +933,83 @@ func codexHeaderDefaults(cfg *config.Config, auth *cliproxyauth.Auth) (string, s
 		}
 	}
 	return strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent), strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+type codexSignatureProfile struct {
+	MimicMode            string
+	UserAgent            string
+	BetaFeatures         string
+	Originator           string
+	Version              string
+	OpenAIBeta           string
+	ForceTurnMetadata    bool
+	StableRequestID      bool
+	StableTurnID         bool
+	TurnMetadataValue    string
+	ForceTurnState       bool
+	TurnStateValue       string
+	IncludeTimingMetrics bool
+	TimingMetricsValue   string
+	IsAPIKey             bool
+}
+
+func (p codexSignatureProfile) MimicEnabled() bool {
+	return p.MimicMode != config.CodexMimicModeOff
+}
+
+func (p codexSignatureProfile) Strict() bool {
+	return p.MimicMode == config.CodexMimicModeStrict
+}
+
+func buildCodexSignatureProfile(cfg *config.Config, auth *cliproxyauth.Auth) codexSignatureProfile {
+	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
+	profile := codexSignatureProfile{
+		MimicMode:          config.CodexMimicModeOff,
+		UserAgent:          codexUserAgent,
+		BetaFeatures:       cfgBetaFeatures,
+		OpenAIBeta:         codexResponsesWebsocketBetaHeaderValue,
+		TurnMetadataValue:  "{}",
+		TurnStateValue:     "{}",
+		TimingMetricsValue: "true",
+	}
+	if cfg != nil {
+		profile.MimicMode = cfg.CodexMimicMode()
+	}
+	if strings.TrimSpace(cfgUserAgent) != "" {
+		profile.UserAgent = strings.TrimSpace(cfgUserAgent)
+	}
+	if auth != nil && auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
+			profile.IsAPIKey = true
+		}
+	}
+	if !profile.IsAPIKey {
+		profile.Originator = codexOriginator
+		if profile.MimicEnabled() {
+			profile.Version = codexVersion
+		}
+	}
+	if profile.Strict() && strings.TrimSpace(profile.BetaFeatures) == "" {
+		profile.BetaFeatures = "multi_agent"
+	}
+	if cfg != nil && profile.Strict() {
+		profile.ForceTurnMetadata = cfg.CodexMimic.Strict.ForceTurnMetadata
+		profile.ForceTurnState = cfg.CodexMimic.Strict.ForceTurnState
+		profile.IncludeTimingMetrics = cfg.CodexMimic.Strict.IncludeTimingMetrics
+		profile.StableRequestID = cfg.CodexMimic.Strict.StableRequestID
+		profile.StableTurnID = cfg.CodexMimic.Strict.StableTurnID
+	}
+	return profile
+}
+
+func shouldUseCodexCompactEndpoint(cfg *config.Config, alt string) bool {
+	if alt != "responses/compact" {
+		return false
+	}
+	if cfg == nil {
+		return true
+	}
+	return cfg.CodexMimicMode() == config.CodexMimicModeOff
 }
 
 func ensureHeaderWithPriority(target http.Header, source http.Header, key, configValue, fallbackValue string) {

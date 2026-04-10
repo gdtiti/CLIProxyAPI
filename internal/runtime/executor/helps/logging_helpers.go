@@ -332,6 +332,10 @@ func ginContextFrom(ctx context.Context) *gin.Context {
 	return ginCtx
 }
 
+func GinContextFrom(ctx context.Context) *gin.Context {
+	return ginContextFrom(ctx)
+}
+
 func getAttempts(ginCtx *gin.Context) []*upstreamAttempt {
 	if ginCtx == nil {
 		return nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,12 +20,14 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
+	authDir := t.TempDir()
+	authPath := filepath.Join(authDir, "test.json")
 	record := &coreauth.Auth{
 		ID:       "test.json",
 		FileName: "test.json",
 		Provider: "claude",
 		Attributes: map[string]string{
-			"path":            "/tmp/test.json",
+			"path":            authPath,
 			"header:X-Old":    "old",
 			"header:X-Remove": "gone",
 		},
@@ -40,7 +43,7 @@ func TestPatchAuthFileFields_MergeHeadersAndDeleteEmptyValues(t *testing.T) {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 
 	body := `{"name":"test.json","prefix":"p1","proxy_url":"http://proxy.local","headers":{"X-Old":"new","X-New":"v","X-Remove":"  ","X-Nope":""}}`
 	rec := httptest.NewRecorder()
@@ -114,12 +117,14 @@ func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
 
 	store := &memoryAuthStore{}
 	manager := coreauth.NewManager(store, nil, nil)
+	authDir := t.TempDir()
+	authPath := filepath.Join(authDir, "noop.json")
 	record := &coreauth.Auth{
 		ID:       "noop.json",
 		FileName: "noop.json",
 		Provider: "claude",
 		Attributes: map[string]string{
-			"path":         "/tmp/noop.json",
+			"path":         authPath,
 			"header:X-Kee": "1",
 		},
 		Metadata: map[string]any{
@@ -133,7 +138,7 @@ func TestPatchAuthFileFields_HeadersEmptyMapIsNoop(t *testing.T) {
 		t.Fatalf("failed to register auth record: %v", errRegister)
 	}
 
-	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
 
 	body := `{"name":"noop.json","note":"hello","headers":{}}`
 	rec := httptest.NewRecorder()

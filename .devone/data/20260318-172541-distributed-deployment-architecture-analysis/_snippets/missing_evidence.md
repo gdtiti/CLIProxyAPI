@@ -1,0 +1,3 @@
+- 真实多节点 + PG + Redis 联机验证结果。
+- config 写路径从 management 返回 200 到 PersistConfig 成功之间的时序证据。
+- 同一配置对象并发写时的冲突策略确认。

@@ -276,3 +276,86 @@ func setRuntimeHeaders(req *http.Request, accessToken string, accountKey string)
 	req.Header.Set("amz-sdk-invocation-id", uuid.New().String())
 	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
 }
+
+// IDCFingerprint stores device fingerprint for IDC enterprise accounts
+// SDK version is fixed (aws-sdk-rust/1.3.9), but OS type/version are randomized once and persisted
+type IDCFingerprint struct {
+	OSType      string `json:"osType"`                // macos, windows, linux
+	OSVersion   string `json:"osVersion"`             // e.g., "14.0", "10.0.22621"
+	SDKVersion  string `json:"sdkVersion,omitempty"`  // e.g., "1.3.9", "1.3.10" (optional, defaults to 1.3.9)
+	RustVersion string `json:"rustVersion,omitempty"` // e.g., "1.87.0", "1.86.0" (optional)
+}
+
+// IDC SDK version pools (aws-sdk-rust versions from Amazon Q CLI)
+// Only use versions that are known to exist in real Amazon Q CLI releases
+var idcSDKVersions = []string{
+	"1.3.9", // Current known version from amq2api
+}
+
+// IDC Rust version pools (versions used by Amazon Q CLI)
+var idcRustVersions = []string{
+	"1.87.0", // Current known version from amq2api
+}
+
+// IDC OS version pools (different from Kiro IDE style)
+var idcOSVersions = map[string][]string{
+	"macos":   {"14.0", "14.1", "14.2", "14.3", "14.4", "14.5", "15.0", "15.1"},
+	"windows": {"10.0.19041", "10.0.19042", "10.0.19043", "10.0.19044", "10.0.22621", "10.0.22631"},
+	"linux":   {"5.15.0", "6.1.0", "6.2.0", "6.5.0", "6.6.0", "6.8.0"},
+}
+
+// GenerateIDCFingerprint generates a new IDC fingerprint with randomized OS and SDK info
+func GenerateIDCFingerprint() *IDCFingerprint {
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	// Random OS type
+	osTypes := []string{"macos", "windows", "linux"}
+	osType := osTypes[rng.Intn(len(osTypes))]
+
+	// Random OS version for the selected OS type
+	versions := idcOSVersions[osType]
+	osVersion := versions[rng.Intn(len(versions))]
+
+	// Random SDK version
+	sdkVersion := idcSDKVersions[rng.Intn(len(idcSDKVersions))]
+
+	// Random Rust version
+	rustVersion := idcRustVersions[rng.Intn(len(idcRustVersions))]
+
+	return &IDCFingerprint{
+		OSType:      osType,
+		OSVersion:   osVersion,
+		SDKVersion:  sdkVersion,
+		RustVersion: rustVersion,
+	}
+}
+
+// getSDKVersion returns the SDK version, defaulting to "1.3.9" if not set
+func (fp *IDCFingerprint) getSDKVersion() string {
+	if fp.SDKVersion != "" {
+		return fp.SDKVersion
+	}
+	return "1.3.9"
+}
+
+// getRustVersion returns the Rust version, defaulting to "1.87.0" if not set
+func (fp *IDCFingerprint) getRustVersion() string {
+	if fp.RustVersion != "" {
+		return fp.RustVersion
+	}
+	return "1.87.0"
+}
+
+// BuildUserAgent builds the User-Agent string for IDC auth (Amazon Q CLI style)
+// Format: aws-sdk-rust/{sdkVersion} os/{osType} lang/rust/{rustVersion}
+func (fp *IDCFingerprint) BuildUserAgent() string {
+	return fmt.Sprintf("aws-sdk-rust/%s os/%s lang/rust/%s",
+		fp.getSDKVersion(), fp.OSType, fp.getRustVersion())
+}
+
+// BuildAmzUserAgent builds the X-Amz-User-Agent string for IDC auth
+// Format: aws-sdk-rust/{sdkVersion} ua/2.1 api/ssooidc/1.88.0 os/{osType} lang/rust/{rustVersion} m/E app/AmazonQ-For-CLI
+func (fp *IDCFingerprint) BuildAmzUserAgent() string {
+	return fmt.Sprintf("aws-sdk-rust/%s ua/2.1 api/ssooidc/1.88.0 os/%s lang/rust/%s m/E app/AmazonQ-For-CLI",
+		fp.getSDKVersion(), fp.OSType, fp.getRustVersion())
+}

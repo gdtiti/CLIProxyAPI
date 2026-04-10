@@ -40,11 +40,18 @@ func (w *Watcher) start(ctx context.Context) error {
 	}
 	log.Debugf("watching auth directory: %s", w.authDir)
 
+	runCtx, cancel := context.WithCancel(ctx)
+	w.clientsMutex.Lock()
+	w.runCancel = cancel
+	w.clientsMutex.Unlock()
+
 	w.watchKiroIDETokenFile()
 
-	go w.processEvents(ctx)
+	go w.processEvents(runCtx)
 
 	w.reloadClients(true, nil, false)
+	w.syncConfigHashFromDisk()
+	w.startAutoReload(runCtx)
 	return nil
 }
 
@@ -120,6 +127,11 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 
 	// Handle auth directory changes incrementally (.json only)
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+		w.cancelPendingAuthWrite(normalizedName)
+		if w.isAuthPathSuppressed(normalizedName, now) {
+			log.Debugf("suppressing auth event for %s", filepath.Base(event.Name))
+			return
+		}
 		if w.shouldDebounceRemove(normalizedName, now) {
 			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
 			return
@@ -145,12 +157,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 	if event.Op&(fsnotify.Create|fsnotify.Write) != 0 {
-		if unchanged, errSame := w.authFileUnchanged(event.Name); errSame == nil && unchanged {
-			log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(event.Name))
-			return
-		}
-		log.Infof("auth file changed (%s): %s, processing incrementally", event.Op.String(), filepath.Base(event.Name))
-		w.addOrUpdateClient(event.Name)
+		w.clearAuthPathSuppression(normalizedName)
+		w.scheduleAuthWrite(normalizedName, event.Name)
 	}
 }
 
@@ -259,4 +267,123 @@ func (w *Watcher) shouldDebounceRemove(normalizedPath string, now time.Time) boo
 	}
 	w.clientsMutex.Unlock()
 	return false
+}
+
+func (w *Watcher) isAuthPathSuppressed(normalizedPath string, now time.Time) bool {
+	if w == nil || normalizedPath == "" {
+		return false
+	}
+	w.eventMu.Lock()
+	defer w.eventMu.Unlock()
+	if len(w.suppressedAuth) == 0 {
+		return false
+	}
+	for path, until := range w.suppressedAuth {
+		if !until.After(now) {
+			delete(w.suppressedAuth, path)
+		}
+	}
+	until, ok := w.suppressedAuth[normalizedPath]
+	return ok && until.After(now)
+}
+
+func (w *Watcher) clearAuthPathSuppression(normalizedPath string) {
+	if w == nil || normalizedPath == "" {
+		return
+	}
+	w.eventMu.Lock()
+	if len(w.suppressedAuth) > 0 {
+		delete(w.suppressedAuth, normalizedPath)
+	}
+	w.eventMu.Unlock()
+}
+
+func (w *Watcher) scheduleAuthWrite(normalizedPath, path string) {
+	if w == nil || normalizedPath == "" {
+		return
+	}
+	w.eventMu.Lock()
+	if w.pendingAuthWrites == nil {
+		w.pendingAuthWrites = make(map[string]*pendingAuthWrite)
+	}
+	if existing, ok := w.pendingAuthWrites[normalizedPath]; ok {
+		existing.path = path
+		existing.generation++
+		generation := existing.generation
+		if existing.timer != nil {
+			existing.timer.Stop()
+		}
+		existing.timer = time.AfterFunc(authWriteDebounceWindow, func() {
+			w.flushPendingAuthWrite(normalizedPath, generation)
+		})
+		w.pendingAuthWrites[normalizedPath] = existing
+		w.eventMu.Unlock()
+		return
+	}
+	entry := &pendingAuthWrite{
+		path:       path,
+		generation: 1,
+	}
+	generation := entry.generation
+	entry.timer = time.AfterFunc(authWriteDebounceWindow, func() {
+		w.flushPendingAuthWrite(normalizedPath, generation)
+	})
+	w.pendingAuthWrites[normalizedPath] = entry
+	w.eventMu.Unlock()
+}
+
+func (w *Watcher) flushPendingAuthWrite(normalizedPath string, generation uint64) {
+	if w == nil || normalizedPath == "" || w.stopped.Load() {
+		return
+	}
+	w.eventMu.Lock()
+	entry, ok := w.pendingAuthWrites[normalizedPath]
+	if !ok {
+		w.eventMu.Unlock()
+		return
+	}
+	if generation > 0 && entry.generation != generation {
+		w.eventMu.Unlock()
+		return
+	}
+	path := entry.path
+	delete(w.pendingAuthWrites, normalizedPath)
+	w.eventMu.Unlock()
+
+	if unchanged, errSame := w.authFileUnchanged(path); errSame == nil && unchanged {
+		log.Debugf("auth file unchanged (hash match), skipping reload: %s", filepath.Base(path))
+		return
+	}
+	log.Infof("auth file changed (%s): %s, processing incrementally", fsnotify.Write.String(), filepath.Base(path))
+	w.addOrUpdateClient(path)
+}
+
+func (w *Watcher) cancelPendingAuthWrite(normalizedPath string) {
+	if w == nil || normalizedPath == "" {
+		return
+	}
+	w.eventMu.Lock()
+	defer w.eventMu.Unlock()
+	entry, ok := w.pendingAuthWrites[normalizedPath]
+	if !ok {
+		return
+	}
+	if entry.timer != nil {
+		entry.timer.Stop()
+	}
+	delete(w.pendingAuthWrites, normalizedPath)
+}
+
+func (w *Watcher) stopPendingAuthWrites() {
+	if w == nil {
+		return
+	}
+	w.eventMu.Lock()
+	defer w.eventMu.Unlock()
+	for key, entry := range w.pendingAuthWrites {
+		if entry != nil && entry.timer != nil {
+			entry.timer.Stop()
+		}
+		delete(w.pendingAuthWrites, key)
+	}
 }

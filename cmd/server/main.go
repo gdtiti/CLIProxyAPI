@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,11 +14,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
@@ -33,6 +36,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -62,6 +66,16 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	} else {
 		cfg.IncognitoBrowser = true // Kiro default
 	}
+}
+
+// resolveUsageInstanceID 生成 usage 实例标识。
+// 优先使用 USAGE_INSTANCE_ID 环境变量，否则自动生成 hostname-port。
+func resolveUsageInstanceID(port int) string {
+	if id := os.Getenv("USAGE_INSTANCE_ID"); id != "" && id != "auto" {
+		return id
+	}
+	hostname, _ := os.Hostname()
+	return fmt.Sprintf("%s-%d", hostname, port)
 }
 
 // main is the entry point of the application.
@@ -510,7 +524,7 @@ func main() {
 	}
 
 	// Register built-in access providers before constructing services.
-	configaccess.Register(&cfg.SDKConfig)
+	configaccess.Register()
 
 	// Handle different command modes based on the provided flags.
 
@@ -688,7 +702,53 @@ func main() {
 				defer kiro.StopGlobalRefreshManager()
 			}
 
-			cmd.StartService(cfg, configFilePath, password)
+			// PG Usage 持久化初始化
+			var usagePlugin *usage.LoggerPlugin
+			if usePostgresStore && pgStoreDSN != "" {
+				usageDB, errDB := sql.Open("pgx", pgStoreDSN)
+				if errDB != nil {
+					log.Errorf("failed to open PG for usage: %v", errDB)
+				} else {
+					if errSchema := usage.EnsureUsageSchema(usageDB, pgStoreSchema); errSchema != nil {
+						log.Errorf("failed to ensure usage schema: %v", errSchema)
+						usageDB.Close()
+					} else {
+						instanceID := resolveUsageInstanceID(cfg.Port)
+						usagePlugin = usage.NewPersistentLoggerPlugin(usageDB, instanceID)
+						// 替换 init() 中注册的默认 LoggerPlugin
+						coreusage.ClearDefaultPlugins()
+						coreusage.RegisterPlugin(usagePlugin)
+						usagePlugin.Start()
+						defer usagePlugin.Stop()
+						defer usageDB.Close()
+						log.Infof("PG usage persistence enabled, instance: %s", instanceID)
+
+						// 启动 CleanupWorker
+						retainDays := 30
+						if v := os.Getenv("USAGE_RETAIN_DAYS"); v != "" {
+							if n, err := strconv.Atoi(v); err == nil && n > 0 {
+								retainDays = n
+							}
+						}
+						aggRetainDays := 365
+						if v := os.Getenv("USAGE_AGG_RETAIN_DAYS"); v != "" {
+							if n, err := strconv.Atoi(v); err == nil && n > 0 {
+								aggRetainDays = n
+							}
+						}
+						cleanup := usage.NewCleanupWorker(usageDB, retainDays, aggRetainDays)
+						cleanup.Start()
+						defer cleanup.Stop()
+					}
+				}
+			}
+
+			// 启动服务，传入 usagePlugin（如果有）
+			var serverOpts []api.ServerOption
+			if usagePlugin != nil {
+				serverOpts = append(serverOpts, api.WithUsagePlugin(usagePlugin))
+			}
+			cmd.StartService(cfg, configFilePath, password, serverOpts...)
 		}
 	}
 }

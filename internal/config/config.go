@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	log "github.com/sirupsen/logrus"
@@ -22,6 +24,7 @@ import (
 const (
 	DefaultPanelGitHubRepository = "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
 	DefaultPprofAddr             = "127.0.0.1:8316"
+	EnvAutoReloadIntervalSeconds = "CLIPROXY_AUTO_RELOAD_INTERVAL_SECONDS"
 )
 
 // Config represents the application's configuration, loaded from a YAML file.
@@ -65,6 +68,13 @@ type Config struct {
 	// UsageStatisticsEnabled toggles in-memory usage aggregation; when false, usage data is discarded.
 	UsageStatisticsEnabled bool `yaml:"usage-statistics-enabled" json:"usage-statistics-enabled"`
 
+	// AutoReloadIntervalSeconds defines the watcher auto reload interval in seconds.
+	// It is currently intended to be controlled by environment override.
+	AutoReloadIntervalSeconds int `yaml:"-" json:"-"`
+
+	// DistributedSync configures cross-node config/auth synchronization.
+	DistributedSync DistributedSyncConfig `yaml:"distributed-sync" json:"distributed-sync"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -78,6 +88,12 @@ type Config struct {
 
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
+
+	// AuthRuntime configures runtime auth cleanup and recovery behavior.
+	AuthRuntime AuthRuntimeConfig `yaml:"auth-runtime" json:"auth-runtime"`
+
+	// AuthMaintenance controls background auth maintenance for runtime auths.
+	AuthMaintenance AuthMaintenanceConfig `yaml:"auth-maintenance" json:"auth-maintenance"`
 
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
@@ -119,6 +135,9 @@ type Config struct {
 	// VertexCompatAPIKey defines Vertex AI-compatible API key configurations for third-party providers.
 	// Used for services that use Vertex AI-style paths but with simple API key authentication.
 	VertexCompatAPIKey []VertexCompatKey `yaml:"vertex-api-key" json:"vertex-api-key"`
+
+	// GeminiCLI groups configuration for Gemini CLI client
+	GeminiCLI GeminiCLIConfig `yaml:"gemini-cli" json:"gemini-cli"`
 
 	// AmpCode contains Amp CLI upstream configuration, management restrictions, and model mappings.
 	AmpCode AmpCode `yaml:"ampcode" json:"ampcode"`
@@ -169,6 +188,49 @@ type CodexHeaderDefaults struct {
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
+const (
+	CodexMimicModeOff    = "off"
+	CodexMimicModeSafe   = "safe"
+	CodexMimicModeStrict = "strict"
+)
+
+// CodexMimicConfig controls Codex request signature normalization and upstream compact bypassing.
+type CodexMimicConfig struct {
+	Mode   string                 `yaml:"mode" json:"mode"`
+	Strict CodexMimicStrictConfig `yaml:"strict,omitempty" json:"strict,omitempty"`
+}
+
+// CodexMimicStrictConfig contains opt-in strict-mode masquerade knobs.
+// They are intentionally narrow so strict mode stays controllable instead of fabricating
+// large opaque client state blobs by default.
+type CodexMimicStrictConfig struct {
+	ForceTurnMetadata    bool `yaml:"force-turn-metadata,omitempty" json:"force-turn-metadata,omitempty"`
+	ForceTurnState       bool `yaml:"force-turn-state,omitempty" json:"force-turn-state,omitempty"`
+	IncludeTimingMetrics bool `yaml:"include-timing-metrics,omitempty" json:"include-timing-metrics,omitempty"`
+	StableRequestID      bool `yaml:"stable-request-id,omitempty" json:"stable-request-id,omitempty"`
+	StableTurnID         bool `yaml:"stable-turn-id,omitempty" json:"stable-turn-id,omitempty"`
+}
+
+// CodexMimicMode returns the normalized Codex mimic mode.
+func (cfg *SDKConfig) CodexMimicMode() string {
+	if cfg == nil {
+		return CodexMimicModeOff
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.CodexMimic.Mode)) {
+	case CodexMimicModeSafe:
+		return CodexMimicModeSafe
+	case CodexMimicModeStrict:
+		return CodexMimicModeStrict
+	default:
+		return CodexMimicModeOff
+	}
+}
+
+// CodexMimicEnabled reports whether Codex mimic mode is active.
+func (cfg *SDKConfig) CodexMimicEnabled() bool {
+	return cfg.CodexMimicMode() != CodexMimicModeOff
+}
+
 // TLSConfig holds HTTPS server settings.
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode.
@@ -177,6 +239,27 @@ type TLSConfig struct {
 	Cert string `yaml:"cert" json:"cert"`
 	// Key is the path to the TLS private key file.
 	Key string `yaml:"key" json:"key"`
+}
+
+// GeminiCLIConfig nests Gemini CLI related options under 'gemini-cli'.
+type GeminiCLIConfig struct {
+	// CodeAssistEndpoint is the Gemini CLI Code Assist API endpoint
+	CodeAssistEndpoint string `yaml:"code-assist-endpoint" json:"code-assist-endpoint"`
+
+	// OAuthEndpoint is the OAuth2 authentication endpoint
+	OAuthEndpoint string `yaml:"oauth-endpoint" json:"oauth-endpoint"`
+
+	// GoogleApisEndpoint is the Google APIs base endpoint
+	GoogleApisEndpoint string `yaml:"google-apis-endpoint" json:"google-apis-endpoint"`
+
+	// ResourceManagerEndpoint is the Resource Manager API endpoint
+	ResourceManagerEndpoint string `yaml:"resource-manager-endpoint" json:"resource-manager-endpoint"`
+
+	// ServiceUsageEndpoint is the Service Usage API endpoint
+	ServiceUsageEndpoint string `yaml:"service-usage-endpoint" json:"service-usage-endpoint"`
+
+	// ProxyURL overrides the global proxy setting for Gemini CLI if provided
+	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
 }
 
 // PprofConfig holds pprof HTTP server settings.
@@ -203,6 +286,67 @@ type RemoteManagement struct {
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 }
 
+// DistributedSyncConfig configures cross-node config/auth synchronization.
+type DistributedSyncConfig struct {
+	// Enabled toggles the distributed sync manager and Redis event publishing.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// NodeID identifies the current node in Redis events. When empty, a runtime fallback is used.
+	NodeID string `yaml:"node-id,omitempty" json:"node-id,omitempty"`
+
+	// Channel is the Redis Pub/Sub channel used for distributed sync events.
+	Channel string `yaml:"channel,omitempty" json:"channel,omitempty"`
+
+	// PollIntervalSeconds defines how often nodes reconcile PG versions when Redis events are missed.
+	PollIntervalSeconds int `yaml:"poll-interval-seconds,omitempty" json:"poll-interval-seconds,omitempty"`
+
+	// Redis holds the Redis connection configuration used for Pub/Sub.
+	Redis RedisSyncConfig `yaml:"redis" json:"redis"`
+}
+
+// RedisSyncConfig configures the Redis connection used by distributed sync.
+type RedisSyncConfig struct {
+	Addr     string `yaml:"addr,omitempty" json:"addr,omitempty"`
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+	DB       int    `yaml:"db,omitempty" json:"db,omitempty"`
+}
+
+const (
+	DefaultDistributedSyncChannel             = "cliproxy:distributed-sync:events"
+	DefaultDistributedSyncPollIntervalSeconds = 30
+)
+
+// IsConfigured returns true when distributed sync is enabled and Redis has a usable address.
+func (c DistributedSyncConfig) IsConfigured() bool {
+	return c.Enabled && strings.TrimSpace(c.Redis.Addr) != ""
+}
+
+// EffectiveChannel returns the configured Redis channel or the default channel.
+func (c DistributedSyncConfig) EffectiveChannel() string {
+	if channel := strings.TrimSpace(c.Channel); channel != "" {
+		return channel
+	}
+	return DefaultDistributedSyncChannel
+}
+
+// EffectivePollInterval returns the configured poll interval or the default value.
+func (c DistributedSyncConfig) EffectivePollInterval() time.Duration {
+	seconds := c.PollIntervalSeconds
+	if seconds <= 0 {
+		seconds = DefaultDistributedSyncPollIntervalSeconds
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// EffectiveNodeID returns the configured node ID or the provided fallback.
+func (c DistributedSyncConfig) EffectiveNodeID(fallback string) string {
+	if nodeID := strings.TrimSpace(c.NodeID); nodeID != "" {
+		return nodeID
+	}
+	return strings.TrimSpace(fallback)
+}
+
 // QuotaExceeded defines the behavior when API quota limits are exceeded.
 // It provides configuration options for automatic failover mechanisms.
 type QuotaExceeded struct {
@@ -217,11 +361,87 @@ type QuotaExceeded struct {
 	AntigravityCredits bool `yaml:"antigravity-credits" json:"antigravity-credits"`
 }
 
+// AuthRuntimeConfig configures runtime auth cleanup policies.
+type AuthRuntimeConfig struct {
+	// UnauthorizedDeleteThreshold controls how many consecutive 401 responses
+	// within the configured window will trigger automatic auth disable. Defaults to 3.
+	UnauthorizedDeleteThreshold int `yaml:"unauthorized-delete-threshold" json:"unauthorized-delete-threshold"`
+
+	// UnauthorizedDeleteWindowSeconds controls the rolling window used for the
+	// consecutive 401 threshold. Defaults to 600 seconds (10 minutes).
+	UnauthorizedDeleteWindowSeconds int `yaml:"unauthorized-delete-window-seconds" json:"unauthorized-delete-window-seconds"`
+}
+
+// AuthMaintenanceConfig controls background maintenance for file-backed runtime auths.
+type AuthMaintenanceConfig struct {
+	// Enable toggles the background maintenance loop and runtime result hook.
+	Enable bool `yaml:"enable" json:"enable"`
+
+	// ScanIntervalSeconds controls how often runtime auths are scanned for queued actions.
+	ScanIntervalSeconds int `yaml:"scan-interval-seconds" json:"scan-interval-seconds"`
+
+	// DeleteIntervalSeconds controls the stagger interval between queued file mutations.
+	DeleteIntervalSeconds int `yaml:"delete-interval-seconds" json:"delete-interval-seconds"`
+
+	// DeleteStatusCodes keeps the legacy field name for configured automatic maintenance triggers.
+	// Matching runtime auths are now disabled instead of deleted; HTTP 429 is always protected.
+	DeleteStatusCodes []int `yaml:"delete-status-codes" json:"delete-status-codes"`
+
+	// DisableStatusCodes defines immediate disable status codes for runtime auths.
+	// When the same code appears in both disable and delete lists, disable wins.
+	DisableStatusCodes []int `yaml:"disable-status-codes" json:"disable-status-codes"`
+
+	// DeleteQuotaExceeded keeps the legacy quota-maintenance switch name for compatibility.
+	// Quota-exhausted auths are now disabled instead of deleted.
+	DeleteQuotaExceeded bool `yaml:"delete-quota-exceeded" json:"delete-quota-exceeded"`
+
+	// QuotaStrikeThreshold is the minimum quota strike count required before automatic disable is queued.
+	QuotaStrikeThreshold int `yaml:"quota-strike-threshold" json:"quota-strike-threshold"`
+
+	// DisableCodexUsageLimitReached keeps the existing project behavior:
+	// Codex usage_limit_reached disables the auth file instead of deleting it.
+	DisableCodexUsageLimitReached bool `yaml:"disable-codex-usage-limit-reached" json:"disable-codex-usage-limit-reached"`
+
+	// CodexMaxRequestCount disables file-backed codex auth after N completed requests.
+	// Set to 0 to disable this cumulative request-count maintenance.
+	CodexMaxRequestCount int `yaml:"codex-max-request-count" json:"codex-max-request-count"`
+
+	// CodexQuotaCheckRequestInterval probes the Codex usage API every N completed
+	// requests for file-backed auth; a 401 probe response disables the auth file.
+	// Set to 0 to disable this periodic quota probe.
+	CodexQuotaCheckRequestInterval int `yaml:"codex-quota-check-request-interval" json:"codex-quota-check-request-interval"`
+}
+
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "success-rate", "simhash".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// SuccessRate configures the "success-rate" routing strategy.
+	SuccessRate RoutingSuccessRateConfig `yaml:"success-rate" json:"success-rate"`
+
+	// SimHash configures the simhash selector virtual pool behavior.
+	SimHash RoutingSimHashConfig `yaml:"simhash" json:"simhash"`
+}
+
+// RoutingSuccessRateConfig configures the success-rate selector.
+// The selector uses a time-decayed (EMA) success rate per auth and model.
+type RoutingSuccessRateConfig struct {
+	// HalfLifeSeconds is the EMA half-life in seconds. Default: 1800 (30 minutes).
+	HalfLifeSeconds int `yaml:"half-life-seconds" json:"half-life-seconds"`
+	// ExploreRate is the probability [0,1] of randomly exploring an auth candidate.
+	// Default: 0.02.
+	ExploreRate float64 `yaml:"explore-rate" json:"explore-rate"`
+}
+
+// RoutingSimHashConfig configures the simhash selector virtual pool behavior.
+type RoutingSimHashConfig struct {
+	// PoolSize defines the global virtual pool target size. Default: 10.
+	PoolSize int `yaml:"pool-size" json:"pool-size"`
+	// AdmitCooldownSeconds defines the minimum interval between admitting new available auths
+	// into the virtual pool after the pool has been filled at least once. Default: 1.
+	AdmitCooldownSeconds int `yaml:"admit-cooldown-seconds" json:"admit-cooldown-seconds"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -422,6 +642,10 @@ type CodexKey struct {
 	// BaseURL is the base URL for the Codex API endpoint.
 	// If empty, the default Codex API URL will be used.
 	BaseURL string `yaml:"base-url" json:"base-url"`
+
+	// PlanType specifies the Codex subscription plan type (plus, free, or empty for general).
+	// This allows differentiation between Plus and Free tier credentials for separate management.
+	PlanType string `yaml:"plan-type,omitempty" json:"plan-type,omitempty"`
 
 	// Websockets enables the Responses API websocket transport for this credential.
 	Websockets bool `yaml:"websockets,omitempty" json:"websockets,omitempty"`
@@ -642,6 +866,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.DisableCooling = false
 	cfg.Pprof.Enable = false
 	cfg.Pprof.Addr = DefaultPprofAddr
+	cfg.AuthMaintenance.Enable = true
+	cfg.AuthMaintenance.DisableCodexUsageLimitReached = true
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
 	cfg.IncognitoBrowser = false // Default to normal browser (AWS uses incognito by force)
@@ -651,6 +877,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 			return &Config{}, nil
 		}
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	// Apply environment variable overrides
+	if err = applyEnvironmentOverrides(&cfg); err != nil {
+		return nil, err
 	}
 
 	// NOTE: Startup legacy key migration is intentionally disabled.
@@ -705,6 +936,30 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		cfg.MaxRetryCredentials = 0
 	}
 
+	// Sanitize routing config.
+	cfg.Routing.Strategy = strings.TrimSpace(cfg.Routing.Strategy)
+	if cfg.Routing.SuccessRate.HalfLifeSeconds <= 0 {
+		cfg.Routing.SuccessRate.HalfLifeSeconds = 1800
+	}
+	if cfg.Routing.SuccessRate.ExploreRate == 0 {
+		cfg.Routing.SuccessRate.ExploreRate = 0.02
+	}
+	if cfg.Routing.SuccessRate.ExploreRate < 0 {
+		cfg.Routing.SuccessRate.ExploreRate = 0
+	}
+	if cfg.Routing.SuccessRate.ExploreRate > 1 {
+		cfg.Routing.SuccessRate.ExploreRate = 1
+	}
+	if cfg.Routing.SimHash.PoolSize <= 0 {
+		cfg.Routing.SimHash.PoolSize = 10
+	}
+	if cfg.Routing.SimHash.AdmitCooldownSeconds <= 0 {
+		cfg.Routing.SimHash.AdmitCooldownSeconds = 1
+	}
+
+	// Sync request authentication providers with inline API keys for backwards compatibility.
+	syncInlineAccessProvider(&cfg)
+
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
@@ -716,6 +971,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
+
+	// Sanitize Codex mimic config.
+	cfg.SanitizeCodexMimic()
 
 	// Sanitize Claude header defaults.
 	cfg.SanitizeClaudeHeaderDefaults()
@@ -755,6 +1013,44 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Return the populated configuration struct.
 	return &cfg, nil
+}
+
+// applyEnvironmentOverrides applies environment variable overrides to the configuration.
+func applyEnvironmentOverrides(cfg *Config) error {
+	// Override Gemini CLI configuration from environment variables
+	if codeAssistEndpoint := os.Getenv("GEMINI_CODE_ASSIST_ENDPOINT"); codeAssistEndpoint != "" {
+		cfg.GeminiCLI.CodeAssistEndpoint = codeAssistEndpoint
+	}
+	if oauthEndpoint := os.Getenv("GEMINI_OAUTH_ENDPOINT"); oauthEndpoint != "" {
+		cfg.GeminiCLI.OAuthEndpoint = oauthEndpoint
+	}
+	if googleApisEndpoint := os.Getenv("GEMINI_GOOGLE_APIS_ENDPOINT"); googleApisEndpoint != "" {
+		cfg.GeminiCLI.GoogleApisEndpoint = googleApisEndpoint
+	}
+	if resourceManagerEndpoint := os.Getenv("GEMINI_RESOURCE_MANAGER_ENDPOINT"); resourceManagerEndpoint != "" {
+		cfg.GeminiCLI.ResourceManagerEndpoint = resourceManagerEndpoint
+	}
+	if serviceUsageEndpoint := os.Getenv("GEMINI_SERVICE_USAGE_ENDPOINT"); serviceUsageEndpoint != "" {
+		cfg.GeminiCLI.ServiceUsageEndpoint = serviceUsageEndpoint
+	}
+
+	// Override remote management configuration from environment variables
+	if allowRemote := os.Getenv("REMOTE_MANAGEMENT_ALLOW_REMOTE"); allowRemote != "" {
+		cfg.RemoteManagement.AllowRemote = allowRemote == "true" || allowRemote == "1"
+	}
+	if secretKey := os.Getenv("REMOTE_MANAGEMENT_SECRET_KEY"); secretKey != "" {
+		cfg.RemoteManagement.SecretKey = secretKey
+	}
+
+	if autoReloadSeconds := strings.TrimSpace(os.Getenv(EnvAutoReloadIntervalSeconds)); autoReloadSeconds != "" {
+		seconds, err := strconv.Atoi(autoReloadSeconds)
+		if err != nil {
+			return fmt.Errorf("%s must be an integer: %w", EnvAutoReloadIntervalSeconds, err)
+		}
+		cfg.AutoReloadIntervalSeconds = seconds
+	}
+
+	return nil
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
@@ -820,6 +1116,14 @@ func (cfg *Config) SanitizeCodexHeaderDefaults() {
 	}
 	cfg.CodexHeaderDefaults.UserAgent = strings.TrimSpace(cfg.CodexHeaderDefaults.UserAgent)
 	cfg.CodexHeaderDefaults.BetaFeatures = strings.TrimSpace(cfg.CodexHeaderDefaults.BetaFeatures)
+}
+
+// SanitizeCodexMimic normalizes the configured Codex mimic mode.
+func (cfg *Config) SanitizeCodexMimic() {
+	if cfg == nil {
+		return
+	}
+	cfg.CodexMimic.Mode = cfg.SDKConfig.CodexMimicMode()
 }
 
 // SanitizeClaudeHeaderDefaults trims surrounding whitespace from the
@@ -1022,6 +1326,18 @@ func normalizeModelPrefix(prefix string) string {
 	return trimmed
 }
 
+func syncInlineAccessProvider(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	if len(cfg.APIKeys) == 0 {
+		if provider := cfg.ConfigAPIKeyProvider(); provider != nil && len(provider.APIKeys) > 0 {
+			cfg.APIKeys = append([]string(nil), provider.APIKeys...)
+		}
+	}
+	cfg.Access.Providers = nil
+}
+
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.
 func looksLikeBcrypt(s string) bool {
 	return len(s) > 4 && (s[:4] == "$2a$" || s[:4] == "$2b$" || s[:4] == "$2y$")
@@ -1109,7 +1425,7 @@ func hashSecret(secret string) (string, error) {
 // SaveConfigPreserveComments writes the config back to YAML while preserving existing comments
 // and key ordering by loading the original file into a yaml.Node tree and updating values in-place.
 func SaveConfigPreserveComments(configFile string, cfg *Config) error {
-	persistCfg := cfg
+	persistCfg := sanitizeConfigForPersist(cfg)
 	// Load original YAML as a node tree to preserve comments and ordering.
 	data, err := os.ReadFile(configFile)
 	if err != nil {
@@ -1175,6 +1491,16 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	data = NormalizeCommentIndentation(buf.Bytes())
 	_, err = f.Write(data)
 	return err
+}
+
+func sanitizeConfigForPersist(cfg *Config) *Config {
+	if cfg == nil {
+		return nil
+	}
+	clone := *cfg
+	clone.SDKConfig = cfg.SDKConfig
+	clone.SDKConfig.Access = AccessConfig{}
+	return &clone
 }
 
 // SaveConfigPreserveCommentsUpdateNestedScalar updates a nested scalar key path like ["a","b"]
@@ -1436,6 +1762,20 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		switch fullPath {
 		case "error-logs-max-files":
 			return node.Value == "10"
+		case "routing.success-rate.half-life-seconds":
+			return node.Value == "1800"
+		case "routing.simhash.pool-size":
+			return node.Value == "10"
+		case "routing.simhash.admit-cooldown-seconds":
+			return node.Value == "1"
+		}
+	}
+
+	// Check float defaults
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!float" {
+		switch fullPath {
+		case "routing.success-rate.explore-rate":
+			return node.Value == "0.02"
 		}
 	}
 
@@ -2005,8 +2345,51 @@ func removeLegacyGenerativeLanguageKeys(root *yaml.Node) {
 }
 
 func removeLegacyAuthBlock(root *yaml.Node) {
-	if root == nil || root.Kind != yaml.MappingNode {
-		return
+	// "auth" is now the canonical key for request authentication providers.
+	// Keep it during persistence instead of treating it as a legacy field.
+	_ = root
+}
+
+// GetCodeAssistEndpoint returns the Code Assist endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetCodeAssistEndpoint() string {
+	if c.CodeAssistEndpoint != "" {
+		return c.CodeAssistEndpoint
 	}
-	removeMapKey(root, "auth")
+	return "https://cloudcode-pa.googleapis.com" // Default official endpoint
+}
+
+// GetOAuthEndpoint returns the OAuth endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetOAuthEndpoint() string {
+	if c.OAuthEndpoint != "" {
+		return c.OAuthEndpoint
+	}
+	return "https://oauth2.googleapis.com" // Default official endpoint
+}
+
+// GetGoogleApisEndpoint returns the Google APIs endpoint, with fallback to default
+func (c *GeminiCLIConfig) GetGoogleApisEndpoint() string {
+	if c.GoogleApisEndpoint != "" {
+		return c.GoogleApisEndpoint
+	}
+	return "https://www.googleapis.com" // Default official endpoint
+}
+
+// GetTokenURL returns the token URL constructed from OAuth endpoint
+func (c *GeminiCLIConfig) GetTokenURL() string {
+	oauthEndpoint := c.GetOAuthEndpoint()
+	return fmt.Sprintf("%s/token", strings.TrimSuffix(oauthEndpoint, "/"))
+}
+
+// GetUserinfoURL returns the userinfo URL constructed from Google APIs endpoint
+func (c *GeminiCLIConfig) GetUserinfoURL() string {
+	googleapisEndpoint := c.GetGoogleApisEndpoint()
+	return fmt.Sprintf("%s/oauth2/v2/userinfo", strings.TrimSuffix(googleapisEndpoint, "/"))
+}
+
+// GetProxyURL returns the proxy URL for Gemini CLI, with fallback to global
+func (c *GeminiCLIConfig) GetProxyURL(globalProxyURL string) string {
+	if c.ProxyURL != "" {
+		return c.ProxyURL
+	}
+	return globalProxyURL
 }

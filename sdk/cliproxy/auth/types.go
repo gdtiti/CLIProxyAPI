@@ -86,11 +86,22 @@ type Auth struct {
 	NextRefreshAfter time.Time `json:"next_refresh_after"`
 	// NextRetryAfter is the earliest time a retry should retrigger.
 	NextRetryAfter time.Time `json:"next_retry_after"`
+	// LastUsedAt records the last successful real request time in UTC (runtime only).
+	LastUsedAt time.Time `json:"-"`
+	// WarmUntil marks the deadline until which background refresh remains enabled (runtime only).
+	WarmUntil time.Time `json:"-"`
+	// ResidentUntil marks an explicit resident deadline for future resident pool integration (runtime only).
+	ResidentUntil time.Time `json:"-"`
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
+
+	// LastRequestSimHash stores the latest routed request SimHash for simhash routing.
+	LastRequestSimHash uint64 `json:"-"`
+	// HasLastRequestSimHash reports whether LastRequestSimHash is initialized.
+	HasLastRequestSimHash bool `json:"-"`
 
 	indexAssigned bool `json:"-"`
 }
@@ -480,6 +491,20 @@ func (a *Auth) ExpirationTime() (time.Time, bool) {
 		return ts, true
 	}
 	return time.Time{}, false
+}
+
+// AllowsBackgroundRefresh reports whether the auth is currently inside a warm or resident window.
+func (a *Auth) AllowsBackgroundRefresh(now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	if !a.ResidentUntil.IsZero() && a.ResidentUntil.After(now) {
+		return true
+	}
+	if !a.WarmUntil.IsZero() && a.WarmUntil.After(now) {
+		return true
+	}
+	return false
 }
 
 var (

@@ -14,8 +14,10 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/distributedsync"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	storepkg "github.com/router-for-me/CLIProxyAPI/v6/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
@@ -90,6 +92,39 @@ type Service struct {
 
 	// wsGateway manages websocket Gemini providers.
 	wsGateway *wsrelay.Manager
+
+	// distributedSync coordinates cross-node config/auth reloads.
+	distributedSync *distributedsync.Manager
+
+	// distributedNotifier publishes local store commits to Redis.
+	distributedNotifier *distributedsync.RedisNotifier
+
+	// maintenanceCancel stops the auth maintenance worker.
+	maintenanceCancel context.CancelFunc
+
+	// maintenanceMu protects auth maintenance queue state.
+	maintenanceMu sync.Mutex
+
+	// maintenanceQueue stores pending auth maintenance actions in FIFO order.
+	maintenanceQueue []authMaintenanceCandidate
+
+	// maintenancePending deduplicates queued auth actions by candidate key.
+	maintenancePending map[string]struct{}
+
+	// maintenanceInFlight tracks auth actions currently being processed.
+	maintenanceInFlight map[string]struct{}
+
+	// maintenanceAuthIDsByPath caches auth ids by backing file path.
+	maintenanceAuthIDsByPath map[string]map[string]struct{}
+
+	// maintenanceAuthPathByID stores the reverse lookup for cache updates.
+	maintenanceAuthPathByID map[string]string
+
+	// maintenanceWake nudges the maintenance loop when new candidates arrive.
+	maintenanceWake chan struct{}
+
+	// maintenanceHookOnce ensures the auth maintenance hook is installed once.
+	maintenanceHookOnce sync.Once
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -109,6 +144,59 @@ func (s *Service) GetWatcher() *WatcherWrapper {
 		return nil
 	}
 	return s.watcher
+}
+
+func (s *Service) setupDistributedSyncNotifier() {
+	if s == nil || s.cfg == nil || !s.cfg.DistributedSync.IsConfigured() {
+		return
+	}
+	pgStore, ok := sdkAuth.GetTokenStore().(*storepkg.PostgresStore)
+	if !ok || pgStore == nil {
+		return
+	}
+	notifier, err := distributedsync.NewRedisNotifier(
+		s.cfg.DistributedSync,
+		distributedsync.DefaultNodeID(s.cfg.Port),
+	)
+	if err != nil {
+		log.WithError(err).Warn("distributed sync: failed to initialize notifier")
+		return
+	}
+	if notifier == nil {
+		return
+	}
+	pgStore.SetDistributedChangeNotifier(notifier)
+	s.distributedNotifier = notifier
+}
+
+func (s *Service) startDistributedSync(ctx context.Context, watcherWrapper *WatcherWrapper) {
+	if s == nil || s.cfg == nil || !s.cfg.DistributedSync.IsConfigured() || watcherWrapper == nil {
+		return
+	}
+	pgStore, ok := sdkAuth.GetTokenStore().(*storepkg.PostgresStore)
+	if !ok || pgStore == nil {
+		return
+	}
+
+	manager, err := distributedsync.NewManager(
+		s.cfg.DistributedSync,
+		distributedsync.DefaultNodeID(s.cfg.Port),
+		pgStore,
+		watcherWrapper,
+	)
+	if err != nil {
+		log.WithError(err).Warn("distributed sync: failed to initialize manager")
+		return
+	}
+	if manager == nil {
+		return
+	}
+	if err = manager.Start(ctx); err != nil {
+		log.WithError(err).Warn("distributed sync: failed to start manager")
+		return
+	}
+	s.distributedSync = manager
+	log.Info("distributed sync manager started")
 }
 
 // newDefaultAuthManager creates a default authentication manager with all supported providers.
@@ -334,24 +422,14 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
-	if s == nil || id == "" {
+	if s == nil || strings.TrimSpace(id) == "" || s.coreManager == nil {
 		return
 	}
-	if s.coreManager == nil {
-		return
+	id = strings.TrimSpace(id)
+	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil && strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
+		executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
 	}
-	GlobalModelRegistry().UnregisterClient(id)
-	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil {
-		existing.Disabled = true
-		existing.Status = coreauth.StatusDisabled
-		if _, err := s.coreManager.Update(ctx, existing); err != nil {
-			log.Errorf("failed to disable auth %s: %v", id, err)
-		}
-		if strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
-			executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
-			s.ensureExecutorsForAuth(existing)
-		}
-	}
+	s.applyCoreAuthRemovalWithReason(ctx, id, "", false)
 }
 
 func (s *Service) applyRetryConfig(cfg *config.Config) {
@@ -523,6 +601,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	s.setupDistributedSyncNotifier()
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -659,6 +738,10 @@ func (s *Service) Run(ctx context.Context) error {
 			switch strategy {
 			case "fill-first", "fillfirst", "ff":
 				return "fill-first"
+			case "success-rate", "successrate", "sr":
+				return "success-rate"
+			case "simhash", "sh":
+				return "simhash"
 			default:
 				return "round-robin"
 			}
@@ -670,10 +753,25 @@ func (s *Service) Run(ctx context.Context) error {
 			switch nextStrategy {
 			case "fill-first":
 				selector = &coreauth.FillFirstSelector{}
+			case "success-rate":
+				selector = coreauth.NewSuccessRateSelector(newCfg.Routing.SuccessRate.HalfLifeSeconds, newCfg.Routing.SuccessRate.ExploreRate)
+			case "simhash":
+				selector = coreauth.NewSimHashSelector(newCfg.Routing.SimHash)
 			default:
 				selector = &coreauth.RoundRobinSelector{}
 			}
 			s.coreManager.SetSelector(selector)
+		} else if s.coreManager != nil {
+			switch nextStrategy {
+			case "success-rate":
+				if selector, ok := s.coreManager.Selector().(*coreauth.SuccessRateSelector); ok && selector != nil {
+					selector.SetConfig(newCfg.Routing.SuccessRate.HalfLifeSeconds, newCfg.Routing.SuccessRate.ExploreRate)
+				}
+			case "simhash":
+				if selector, ok := s.coreManager.Selector().(*coreauth.SimHashSelector); ok && selector != nil {
+					selector.SetConfig(newCfg.Routing.SimHash)
+				}
+			}
 		}
 
 		s.applyRetryConfig(newCfg)
@@ -701,6 +799,16 @@ func (s *Service) Run(ctx context.Context) error {
 		watcherWrapper.SetAuthUpdateQueue(s.authUpdates)
 	}
 	watcherWrapper.SetConfig(s.cfg)
+	if s.server != nil {
+		s.server.SetManagementReloadHooks(api.ManagementReloadHooks{
+			ReloadConfigFromDisk: func() error {
+				return watcherWrapper.ReloadConfigFromDisk()
+			},
+			ReloadAuthFilesFromDisk: func() error {
+				return watcherWrapper.ReloadAuthFiles(true)
+			},
+		})
+	}
 
 	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
 	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
@@ -720,6 +828,9 @@ func (s *Service) Run(ctx context.Context) error {
 		return fmt.Errorf("cliproxy: failed to start watcher: %w", err)
 	}
 	log.Info("file watcher started for config and auth directory changes")
+
+	s.startDistributedSync(ctx, watcherWrapper)
+	s.startAuthMaintenance(ctx)
 
 	// Prefer core auth manager auto refresh if available.
 	if s.coreManager != nil {
@@ -761,8 +872,28 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.watcherCancel != nil {
 			s.watcherCancel()
 		}
+		if s.maintenanceCancel != nil {
+			s.maintenanceCancel()
+			s.maintenanceCancel = nil
+		}
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
+		}
+		if s.distributedSync != nil {
+			if err := s.distributedSync.Stop(); err != nil {
+				log.Errorf("failed to stop distributed sync manager: %v", err)
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
+		}
+		if s.distributedNotifier != nil {
+			if err := s.distributedNotifier.Close(); err != nil {
+				log.Errorf("failed to close distributed sync notifier: %v", err)
+				if shutdownErr == nil {
+					shutdownErr = err
+				}
+			}
 		}
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {

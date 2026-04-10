@@ -360,6 +360,37 @@ func TestDispatchRuntimeAuthUpdateEnqueuesAndUpdatesState(t *testing.T) {
 	w.clientsMutex.RUnlock()
 }
 
+func TestSuppressAuthPath_Expires(t *testing.T) {
+	w := &Watcher{}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	normalized := w.normalizeAuthPath(path)
+
+	w.SuppressAuthPath(path, 100*time.Millisecond)
+	if !w.isAuthPathSuppressed(normalized, time.Now()) {
+		t.Fatal("expected auth path to be suppressed immediately")
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	if w.isAuthPathSuppressed(normalized, time.Now()) {
+		t.Fatal("expected auth path suppression to expire")
+	}
+}
+
+func TestCancelPendingAuthWrite_RemovesScheduledEntry(t *testing.T) {
+	w := &Watcher{}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	normalized := w.normalizeAuthPath(path)
+
+	w.scheduleAuthWrite(normalized, path)
+	w.cancelPendingAuthWrite(normalized)
+
+	w.eventMu.Lock()
+	defer w.eventMu.Unlock()
+	if _, ok := w.pendingAuthWrites[normalized]; ok {
+		t.Fatal("expected pending auth write entry to be removed")
+	}
+}
+
 func TestAddOrUpdateClientSkipsUnchanged(t *testing.T) {
 	tmpDir := t.TempDir()
 	authFile := filepath.Join(tmpDir, "sample.json")
@@ -1661,6 +1692,155 @@ func TestReloadClientsFiltersOAuthProvidersWithoutRescan(t *testing.T) {
 	}
 	if len(w.lastAuthHashes) != 1 {
 		t.Fatalf("expected existing hash cache to be retained, got %d", len(w.lastAuthHashes))
+	}
+}
+
+func TestReloadClientsForceAuthRefreshRebuildsFileCaches(t *testing.T) {
+	tmpDir := t.TempDir()
+	authFile := filepath.Join(tmpDir, "one.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo","value":1}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	w := &Watcher{
+		authDir:        tmpDir,
+		config:         &config.Config{AuthDir: tmpDir},
+		lastAuthHashes: map[string]string{"stale": "hash"},
+	}
+
+	w.reloadClients(false, nil, true)
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if !w.fileAuthCacheReady {
+		t.Fatal("expected file auth cache to be marked ready")
+	}
+	if len(w.lastAuthHashes) != 1 {
+		t.Fatalf("expected rebuilt hash cache for one auth file, got %d", len(w.lastAuthHashes))
+	}
+	if _, ok := w.lastAuthHashes[w.normalizeAuthPath(authFile)]; !ok {
+		t.Fatalf("expected rebuilt cache for %s", authFile)
+	}
+}
+
+func TestSnapshotCoreAuthsForRefreshUsesCachedFileAuths(t *testing.T) {
+	w := &Watcher{
+		authDir: t.TempDir(),
+		config:  &config.Config{AuthDir: t.TempDir()},
+		fileAuthsByPath: map[string]map[string]*coreauth.Auth{
+			"b.json": {
+				"b": {ID: "b", Provider: "file"},
+			},
+			"a.json": {
+				"a": {ID: "a", Provider: "file"},
+			},
+		},
+		fileAuthCacheReady: true,
+	}
+
+	origSnapshot := snapshotCoreAuthsFunc
+	var snapshotCalls int32
+	snapshotCoreAuthsFunc = func(cfg *config.Config, authDir string) []*coreauth.Auth {
+		atomic.AddInt32(&snapshotCalls, 1)
+		return nil
+	}
+	defer func() { snapshotCoreAuthsFunc = origSnapshot }()
+
+	auths := w.snapshotCoreAuthsForRefresh()
+	if got := atomic.LoadInt32(&snapshotCalls); got != 0 {
+		t.Fatalf("expected cached refresh to avoid full snapshot, got %d calls", got)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 cached auths, got %d", len(auths))
+	}
+	if auths[0].ID != "a" || auths[1].ID != "b" {
+		t.Fatalf("expected deterministic auth order [a b], got [%s %s]", auths[0].ID, auths[1].ID)
+	}
+}
+
+func TestHandleAutoReloadTickRescansAuthWhenConfigUnchanged(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	configBytes := []byte("auth-dir: " + strings.ReplaceAll(authDir, "\\", "/") + "\n")
+	if err := os.WriteFile(configPath, configBytes, 0o644); err != nil {
+		t.Fatalf("failed to write config: %v", err)
+	}
+	authFile := filepath.Join(authDir, "auto.json")
+	if err := os.WriteFile(authFile, []byte(`{"type":"demo"}`), 0o644); err != nil {
+		t.Fatalf("failed to write auth file: %v", err)
+	}
+
+	var reloads int32
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		config:         &config.Config{AuthDir: authDir},
+		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		lastAuthHashes: make(map[string]string),
+	}
+	w.syncConfigHashFromDisk()
+
+	w.handleAutoReloadTick()
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if len(w.lastAuthHashes) != 1 {
+		t.Fatalf("expected auth rescan to populate one hash, got %d", len(w.lastAuthHashes))
+	}
+	if atomic.LoadInt32(&reloads) != 1 {
+		t.Fatalf("expected auth rescan to trigger reload callback once, got %d", reloads)
+	}
+}
+
+func TestHandleAutoReloadTickReloadsConfigWhenHashChanges(t *testing.T) {
+	tmpDir := t.TempDir()
+	authDir := filepath.Join(tmpDir, "auth")
+	if err := os.MkdirAll(authDir, 0o755); err != nil {
+		t.Fatalf("failed to create auth dir: %v", err)
+	}
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	oldConfig := &config.Config{AuthDir: authDir, Port: 8080}
+	oldBytes, err := yaml.Marshal(oldConfig)
+	if err != nil {
+		t.Fatalf("failed to marshal old config: %v", err)
+	}
+	if err = os.WriteFile(configPath, oldBytes, 0o644); err != nil {
+		t.Fatalf("failed to write old config: %v", err)
+	}
+
+	var reloads int32
+	w := &Watcher{
+		configPath:     configPath,
+		authDir:        authDir,
+		config:         oldConfig,
+		reloadCallback: func(*config.Config) { atomic.AddInt32(&reloads, 1) },
+		lastAuthHashes: make(map[string]string),
+	}
+	w.SetConfig(oldConfig)
+	w.syncConfigHashFromDisk()
+
+	newConfig := &config.Config{AuthDir: authDir, Port: 9090}
+	newBytes, err := yaml.Marshal(newConfig)
+	if err != nil {
+		t.Fatalf("failed to marshal new config: %v", err)
+	}
+	if err = os.WriteFile(configPath, newBytes, 0o644); err != nil {
+		t.Fatalf("failed to write new config: %v", err)
+	}
+
+	w.handleAutoReloadTick()
+
+	w.clientsMutex.RLock()
+	defer w.clientsMutex.RUnlock()
+	if w.config == nil || w.config.Port != 9090 {
+		t.Fatalf("expected config port to be reloaded to 9090, got %+v", w.config)
+	}
+	if atomic.LoadInt32(&reloads) != 1 {
+		t.Fatalf("expected config reload callback once, got %d", reloads)
 	}
 }
 

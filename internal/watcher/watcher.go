@@ -30,35 +30,40 @@ type authDirProvider interface {
 
 // Watcher manages file watching for configuration and authentication files
 type Watcher struct {
-	configPath        string
-	authDir           string
-	config            *config.Config
-	clientsMutex      sync.RWMutex
-	configReloadMu    sync.Mutex
-	configReloadTimer *time.Timer
-	serverUpdateMu    sync.Mutex
-	serverUpdateTimer *time.Timer
-	serverUpdateLast  time.Time
-	serverUpdatePend  bool
-	stopped           atomic.Bool
-	reloadCallback    func(*config.Config)
-	watcher           *fsnotify.Watcher
-	lastAuthHashes    map[string]string
-	lastAuthContents  map[string]*coreauth.Auth
-	fileAuthsByPath   map[string]map[string]*coreauth.Auth
-	lastRemoveTimes   map[string]time.Time
-	lastConfigHash    string
-	authQueue         chan<- AuthUpdate
-	currentAuths      map[string]*coreauth.Auth
-	runtimeAuths      map[string]*coreauth.Auth
-	dispatchMu        sync.Mutex
-	dispatchCond      *sync.Cond
-	pendingUpdates    map[string]AuthUpdate
-	pendingOrder      []string
-	dispatchCancel    context.CancelFunc
-	storePersister    storePersister
-	mirroredAuthDir   string
-	oldConfigYaml     []byte
+	configPath         string
+	authDir            string
+	config             *config.Config
+	clientsMutex       sync.RWMutex
+	configReloadMu     sync.Mutex
+	configReloadTimer  *time.Timer
+	serverUpdateMu     sync.Mutex
+	serverUpdateTimer  *time.Timer
+	serverUpdateLast   time.Time
+	serverUpdatePend   bool
+	runCancel          context.CancelFunc
+	stopped            atomic.Bool
+	reloadCallback     func(*config.Config)
+	watcher            *fsnotify.Watcher
+	lastAuthHashes     map[string]string
+	lastAuthContents   map[string]*coreauth.Auth
+	fileAuthsByPath    map[string]map[string]*coreauth.Auth
+	fileAuthCacheReady bool
+	lastRemoveTimes    map[string]time.Time
+	lastConfigHash     string
+	authQueue          chan<- AuthUpdate
+	currentAuths       map[string]*coreauth.Auth
+	runtimeAuths       map[string]*coreauth.Auth
+	eventMu            sync.Mutex
+	pendingAuthWrites  map[string]*pendingAuthWrite
+	suppressedAuth     map[string]time.Time
+	dispatchMu         sync.Mutex
+	dispatchCond       *sync.Cond
+	pendingUpdates     map[string]AuthUpdate
+	pendingOrder       []string
+	dispatchCancel     context.CancelFunc
+	storePersister     storePersister
+	mirroredAuthDir    string
+	oldConfigYaml      []byte
 }
 
 // AuthUpdateAction represents the type of change detected in auth sources.
@@ -77,11 +82,18 @@ type AuthUpdate struct {
 	Auth   *coreauth.Auth
 }
 
+type pendingAuthWrite struct {
+	path       string
+	timer      *time.Timer
+	generation uint64
+}
+
 const (
 	// replaceCheckDelay is a short delay to allow atomic replace (rename) to settle
 	// before deciding whether a Remove event indicates a real deletion.
 	replaceCheckDelay        = 50 * time.Millisecond
 	configReloadDebounce     = 150 * time.Millisecond
+	authWriteDebounceWindow  = 150 * time.Millisecond
 	authRemoveDebounceWindow = 1 * time.Second
 	serverUpdateDebounce     = 1 * time.Second
 )
@@ -124,9 +136,17 @@ func (w *Watcher) Start(ctx context.Context) error {
 // Stop stops the file watcher
 func (w *Watcher) Stop() error {
 	w.stopped.Store(true)
+	w.clientsMutex.Lock()
+	cancel := w.runCancel
+	w.runCancel = nil
+	w.clientsMutex.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	w.stopDispatch()
 	w.stopConfigReloadTimer()
 	w.stopServerUpdateTimer()
+	w.stopPendingAuthWrites()
 	return w.watcher.Close()
 }
 
@@ -148,6 +168,33 @@ func (w *Watcher) SetAuthUpdateQueue(queue chan<- AuthUpdate) {
 // Returns true if the update was enqueued; false if no queue is configured.
 func (w *Watcher) DispatchRuntimeAuthUpdate(update AuthUpdate) bool {
 	return w.dispatchRuntimeAuthUpdate(update)
+}
+
+// SuppressAuthPath ignores watcher auth remove/rename events for a short window
+// after an internal mutation so self-observed deletes are not processed twice.
+func (w *Watcher) SuppressAuthPath(path string, window time.Duration) {
+	if w == nil || window <= 0 {
+		return
+	}
+	normalized := w.normalizeAuthPath(path)
+	if normalized == "" {
+		return
+	}
+	w.eventMu.Lock()
+	if w.suppressedAuth == nil {
+		w.suppressedAuth = make(map[string]time.Time)
+	}
+	expiresAt := time.Now().Add(window)
+	w.suppressedAuth[normalized] = expiresAt
+	if len(w.suppressedAuth) > 256 {
+		now := time.Now()
+		for key, until := range w.suppressedAuth {
+			if !until.After(now) {
+				delete(w.suppressedAuth, key)
+			}
+		}
+	}
+	w.eventMu.Unlock()
 }
 
 // SnapshotCoreAuths converts current clients snapshot into core auth entries.

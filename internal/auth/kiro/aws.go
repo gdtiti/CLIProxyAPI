@@ -52,6 +52,9 @@ type KiroTokenData struct {
 	StartURL string `json:"startUrl,omitempty"`
 	// Region is the OIDC region for IDC login and token refresh
 	Region string `json:"region,omitempty"`
+	// Fingerprint stores the device fingerprint for IDC auth (OS type, version, etc.)
+	// This is generated once and persisted to ensure consistent User-Agent across requests
+	Fingerprint *IDCFingerprint `json:"fingerprint,omitempty"`
 }
 
 // KiroAuthBundle aggregates authentication data after OAuth flow completion

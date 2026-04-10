@@ -68,12 +68,15 @@ func (k *KiroAuth) LoadTokenFromFile(tokenFile string) (*KiroTokenData, error) {
 		return nil, fmt.Errorf("failed to read token file: %w", err)
 	}
 
-	var tokenData KiroTokenData
-	if err := json.Unmarshal(data, &tokenData); err != nil {
+	// Try to parse as KiroTokenStorage first (snake_case fields used in file storage)
+	// This is the format used by the management UI and file-based token store
+	var storage KiroTokenStorage
+	if err := json.Unmarshal(data, &storage); err != nil {
 		return nil, fmt.Errorf("failed to parse token file: %w", err)
 	}
 
-	return &tokenData, nil
+	// Convert to KiroTokenData for API use
+	return storage.ToTokenData(), nil
 }
 
 // IsTokenExpired checks if the token has expired.

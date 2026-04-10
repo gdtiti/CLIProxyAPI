@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -31,6 +33,7 @@ import (
 
 const (
 	codexUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
+	codexVersion    = "0.118.0"
 	codexOriginator = "codex-tui"
 )
 
@@ -80,7 +83,7 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 }
 
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
-	if opts.Alt == "responses/compact" {
+	if shouldUseCodexCompactEndpoint(e.cfg, opts.Alt) {
 		return e.executeCompact(ctx, auth, req, opts)
 	}
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
@@ -157,7 +160,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newCodexStatusErr(httpResp.StatusCode, b)
+		codexErr := newCodexStatusErr(httpResp.StatusCode, b)
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, codexErr.code, b, time.Now())
+		if retryAfter != nil {
+			codexErr.retryAfter = retryAfter
+		}
+		codexErr.cooldownWindow = quotaWindow
+		err = codexErr
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -303,7 +312,13 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		b, _ := io.ReadAll(httpResp.Body)
 		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		err = newCodexStatusErr(httpResp.StatusCode, b)
+		codexErr := newCodexStatusErr(httpResp.StatusCode, b)
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, codexErr.code, b, time.Now())
+		if retryAfter != nil {
+			codexErr.retryAfter = retryAfter
+		}
+		codexErr.cooldownWindow = quotaWindow
+		err = codexErr
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -400,7 +415,13 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		}
 		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
 		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		err = newCodexStatusErr(httpResp.StatusCode, data)
+		codexErr := newCodexStatusErr(httpResp.StatusCode, data)
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, codexErr.code, data, time.Now())
+		if retryAfter != nil {
+			codexErr.retryAfter = retryAfter
+		}
+		codexErr.cooldownWindow = quotaWindow
+		err = codexErr
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -615,6 +636,16 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	svc := codexauth.NewCodexAuth(e.cfg)
 	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
 	if err != nil {
+		if errors.Is(err, codexauth.ErrRefreshTokenReused) {
+			auth.Disabled = true
+			auth.Status = cliproxyauth.StatusDisabled
+			auth.StatusMessage = "disabled: refresh token reused, sign in again"
+			if auth.Metadata == nil {
+				auth.Metadata = make(map[string]any)
+			}
+			auth.Metadata["refresh_disabled_reason"] = "refresh_token_reused"
+			return auth, nil
+		}
 		return nil, err
 	}
 	if auth.Metadata == nil {
@@ -625,8 +656,12 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	if td.RefreshToken != "" {
 		auth.Metadata["refresh_token"] = td.RefreshToken
 	}
-	if td.AccountID != "" {
-		auth.Metadata["account_id"] = td.AccountID
+	accountID := strings.TrimSpace(td.AccountID)
+	if accountID == "" {
+		accountID = codexauth.AccountIDFromIDToken(td.IDToken)
+	}
+	if accountID != "" {
+		auth.Metadata["account_id"] = accountID
 	}
 	auth.Metadata["email"] = td.Email
 	// Use unified key in files
@@ -685,14 +720,48 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	if ginHeaders.Get("X-Codex-Beta-Features") != "" {
-		r.Header.Set("X-Codex-Beta-Features", ginHeaders.Get("X-Codex-Beta-Features"))
-	}
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
-	misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	profile := buildCodexSignatureProfile(cfg, auth)
 	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
-	ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	if profile.Strict() && profile.BetaFeatures != "" {
+		r.Header.Set("X-Codex-Beta-Features", profile.BetaFeatures)
+	} else {
+		ensureHeaderWithPriority(r.Header, ginHeaders, "X-Codex-Beta-Features", "", "")
+	}
+	if profile.Strict() && profile.Version != "" {
+		r.Header.Set("Version", profile.Version)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "Version", profile.Version)
+	}
+	misc.EnsureHeader(r.Header, ginHeaders, "session_id", uuid.NewString())
+	turnMetadataValue := ""
+	stableTurnID := ""
+	if profile.Strict() && profile.StableTurnID {
+		stableTurnID = codexStableDerivedID("turn-id", r.Header, ginHeaders)
+	}
+	if profile.Strict() && profile.StableTurnID {
+		turnMetadataValue = codexTurnMetadataValue(stableTurnID)
+	} else if profile.Strict() && profile.ForceTurnMetadata {
+		turnMetadataValue = profile.TurnMetadataValue
+	}
+	if profile.Strict() && (profile.ForceTurnMetadata || profile.StableTurnID) {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", turnMetadataValue)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Codex-Turn-Metadata", "")
+	}
+	if profile.MimicEnabled() {
+		requestIDValue := uuid.NewString()
+		if profile.Strict() && profile.StableRequestID {
+			requestIDValue = codexStableDerivedID("request-id", r.Header, ginHeaders)
+		}
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", requestIDValue)
+	} else {
+		misc.EnsureHeader(r.Header, ginHeaders, "X-Client-Request-Id", "")
+	}
+	if profile.Strict() {
+		r.Header.Set("User-Agent", profile.UserAgent)
+	} else {
+		ensureHeaderWithConfigPrecedence(r.Header, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
 
 	if strings.Contains(r.Header.Get("User-Agent"), "Mac OS") {
 		misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
@@ -705,15 +774,14 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 	r.Header.Set("Connection", "Keep-Alive")
 
-	isAPIKey := false
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["api_key"]); v != "" {
-			isAPIKey = true
-		}
-	}
+	isAPIKey := profile.IsAPIKey
 	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
-		r.Header.Set("Originator", originator)
-	} else if !isAPIKey {
+		if profile.Strict() && profile.Originator != "" {
+			r.Header.Set("Originator", profile.Originator)
+		} else {
+			r.Header.Set("Originator", originator)
+		}
+	} else if profile.Originator != "" && !isAPIKey {
 		r.Header.Set("Originator", codexOriginator)
 	}
 	if !isAPIKey {
@@ -807,6 +875,100 @@ func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 		}
 	}
 	return
+}
+
+func authIDOrEmpty(a *cliproxyauth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	return a.ID
+}
+
+func (e *CodexExecutor) resolveCodexUsageLimitRetryAfter(ctx context.Context, auth *cliproxyauth.Auth, apiKey, baseURL string, statusCode int, errorBody []byte, now time.Time) (*time.Duration, string) {
+	retryAfter := helps.ParseCodexUsageLimitRetryAfter(errorBody, now)
+	// 429 一律拉取 usage API 获取配额，区分 five_hour/weekly，设置精确恢复时间
+	if statusCode == http.StatusTooManyRequests {
+		quotaDecision := e.fetchCodexQuotaRetryDecision(ctx, auth, apiKey, baseURL, now)
+		if quotaDecision.RetryAfter != nil {
+			helps.LogWithRequestID(ctx).Infof("codex 429: fetched quota window=%s retry_after=%v auth=%s",
+				quotaDecision.Window, *quotaDecision.RetryAfter, authIDOrEmpty(auth))
+			return quotaDecision.RetryAfter, quotaDecision.Window
+		}
+	}
+	if !helps.IsCodexUsageLimitReached(errorBody) {
+		return retryAfter, ""
+	}
+	quotaDecision := e.fetchCodexQuotaRetryDecision(ctx, auth, apiKey, baseURL, now)
+	if quotaDecision.RetryAfter != nil {
+		return quotaDecision.RetryAfter, quotaDecision.Window
+	}
+	return retryAfter, ""
+}
+
+func (e *CodexExecutor) fetchCodexQuotaRetryDecision(ctx context.Context, auth *cliproxyauth.Auth, apiKey, baseURL string, now time.Time) helps.CodexQuotaRetryDecision {
+	if strings.TrimSpace(apiKey) == "" || auth == nil || auth.Metadata == nil {
+		return helps.CodexQuotaRetryDecision{}
+	}
+	accountID, _ := auth.Metadata["account_id"].(string)
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return helps.CodexQuotaRetryDecision{}
+	}
+	usageURL := codexUsageURL(baseURL)
+	requestCtx := ctx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	quotaCtx, cancel := context.WithTimeout(requestCtx, 6*time.Second)
+	defer cancel()
+
+	quotaReq, err := http.NewRequestWithContext(quotaCtx, http.MethodGet, usageURL, nil)
+	if err != nil {
+		return helps.CodexQuotaRetryDecision{}
+	}
+	quotaReq.Header.Set("Authorization", "Bearer "+apiKey)
+	quotaReq.Header.Set("Accept", "application/json")
+	quotaReq.Header.Set("Content-Type", "application/json")
+	quotaReq.Header.Set("User-Agent", codexUserAgent)
+	quotaReq.Header.Set("Chatgpt-Account-Id", accountID)
+
+	httpClient := newProxyAwareHTTPClient(quotaCtx, e.cfg, auth, 0)
+	quotaResp, err := httpClient.Do(quotaReq)
+	if err != nil {
+		helps.LogWithRequestID(ctx).Debugf("codex usage quota query failed: %v", err)
+		return helps.CodexQuotaRetryDecision{}
+	}
+	defer func() {
+		if errClose := quotaResp.Body.Close(); errClose != nil {
+			log.Errorf("codex executor: close usage quota response body error: %v", errClose)
+		}
+	}()
+
+	body, err := io.ReadAll(quotaResp.Body)
+	if err != nil {
+		return helps.CodexQuotaRetryDecision{}
+	}
+	if quotaResp.StatusCode < http.StatusOK || quotaResp.StatusCode >= http.StatusMultipleChoices {
+		helps.LogWithRequestID(ctx).Debugf("codex usage quota query non-2xx status: %d", quotaResp.StatusCode)
+		return helps.CodexQuotaRetryDecision{}
+	}
+	return helps.ParseCodexQuotaRetryDecision(body, now)
+}
+
+func codexUsageURL(baseURL string) string {
+	const fallback = "https://chatgpt.com/backend-api/wham/usage"
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return fallback
+	}
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fallback
+	}
+	parsed.Path = "/backend-api/wham/usage"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
 }
 
 func (e *CodexExecutor) resolveCodexConfig(auth *cliproxyauth.Auth) *config.CodexKey {

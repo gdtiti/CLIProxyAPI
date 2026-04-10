@@ -1,6 +1,36 @@
+# Sync .project/sourceTexts/ folder (source text files)
+
+# Don't sync user-specific SQLite databases
+.project/*.sqlite
+
+# Don't sync SQLite auxiliary files
+.project/*.sqlite-wal
+.project/*.sqlite-shm
+
+# Don't sync user-specific files
+.project/complete_drafts.txt
+.project/localProjectSettings.json
+.project/localProjectSwap.json
+copilot-messages.log
+
+# Archive formats
+*.zip
+*.rar
+*.7z
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.gz
+*.bz2
+*.xz
+
 # Binaries
 cli-proxy-api
 cliproxy
+!sdk/cliproxy/
+!sdk/cliproxy/auth/
+!sdk/cliproxy/auth/runtime_persistence.go
 /server
 *.exe
 
@@ -17,6 +47,12 @@ temp/*
 refs/*
 tmp/*
 
+# Disk images and virtual machine files
+*.iso
+*.img
+*.vhd
+*.vmdk
+
 # Storage backends
 pgstore/*
 gitstore/*
@@ -31,6 +67,12 @@ auths/*
 
 # Documentation
 docs/*
+!docs/README.md
+!docs/distributed-sync-two-node-setup_CN.md
+!docs/distributed-sync-checklist_CN.md
+!docs/distributed-sync-incident-matrix_CN.md
+!docs/docker-compose-distributed-sync-two-node.yaml
+!docs/distributed-sync-config.shared.yaml
 AGENTS.md
 CLAUDE.md
 GEMINI.md
@@ -62,4 +104,5 @@ _bmad-output/*
 .cli-proxy-api/
 .venv/
 *.bak
+.project/attachments/files/**
 .ace-tool/

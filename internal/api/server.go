@@ -52,11 +52,14 @@ type serverOptionConfig struct {
 	keepAliveEnabled     bool
 	keepAliveTimeout     time.Duration
 	keepAliveOnTimeout   func()
+	usagePlugin          *usage.LoggerPlugin
 	postAuthHook         auth.PostAuthHook
 }
 
 // ServerOption customises HTTP server construction.
 type ServerOption func(*serverOptionConfig)
+
+type ManagementReloadHooks = managementHandlers.RuntimeReloadHooks
 
 func defaultRequestLoggerFactory(cfg *config.Config, configPath string) logging.RequestLogger {
 	configDir := filepath.Dir(configPath)
@@ -111,11 +114,26 @@ func WithRequestLoggerFactory(factory func(*config.Config, string) logging.Reque
 	}
 }
 
+// WithUsagePlugin injects a LoggerPlugin into the management handler for PG-backed usage.
+func WithUsagePlugin(plugin *usage.LoggerPlugin) ServerOption {
+	return func(cfg *serverOptionConfig) {
+		cfg.usagePlugin = plugin
+	}
+}
+
 // WithPostAuthHook registers a hook to be called after auth record creation.
 func WithPostAuthHook(hook auth.PostAuthHook) ServerOption {
 	return func(cfg *serverOptionConfig) {
 		cfg.postAuthHook = hook
 	}
+}
+
+// SetManagementReloadHooks wires management-only runtime reload callbacks after server construction.
+func (s *Server) SetManagementReloadHooks(hooks ManagementReloadHooks) {
+	if s == nil || s.mgmt == nil {
+		return
+	}
+	s.mgmt.SetRuntimeReloadHooks(hooks)
 }
 
 // Server represents the main API server.
@@ -266,6 +284,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	s.mgmt = managementHandlers.NewHandler(cfg, configFilePath, authManager)
 	if optionState.localPassword != "" {
 		s.mgmt.SetLocalPassword(optionState.localPassword)
+	}
+	if optionState.usagePlugin != nil {
+		s.mgmt.SetUsagePlugin(optionState.usagePlugin)
 	}
 	logDir := logging.ResolveLogDirectory(cfg)
 	s.mgmt.SetLogDirectory(logDir)
@@ -532,11 +553,13 @@ func (s *Server) registerManagementRoutes() {
 	mgmt.Use(s.managementAvailabilityMiddleware(), s.mgmt.Middleware())
 	{
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
+		mgmt.DELETE("/usage", s.mgmt.DeleteUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
+		mgmt.POST("/config.yaml/reload-from-store", s.mgmt.PostReloadConfigFromStore)
 		mgmt.GET("/latest-version", s.mgmt.GetLatestVersion)
 
 		mgmt.GET("/debug", s.mgmt.GetDebug)
@@ -652,6 +675,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/codex-api-key", s.mgmt.PutCodexKeys)
 		mgmt.PATCH("/codex-api-key", s.mgmt.PatchCodexKey)
 		mgmt.DELETE("/codex-api-key", s.mgmt.DeleteCodexKey)
+		mgmt.GET("/codex-api-key/by-plan-type", s.mgmt.GetCodexKeysByPlanType)
+		mgmt.GET("/codex-api-key/plan-types", s.mgmt.GetCodexPlanTypes)
 
 		mgmt.GET("/openai-compatibility", s.mgmt.GetOpenAICompat)
 		mgmt.PUT("/openai-compatibility", s.mgmt.PutOpenAICompat)
@@ -677,8 +702,15 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
+		mgmt.POST("/auth-files/batch", s.mgmt.UploadAuthFilesBatch)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
+		mgmt.POST("/auth-files/reload-from-store", s.mgmt.PostReloadAuthFilesFromStore)
+		mgmt.GET("/auth-files/recycle-bin", s.mgmt.ListAuthRecycleBin)
+		mgmt.POST("/auth-files/recycle-bin/restore", s.mgmt.RestoreAuthFile)
+		mgmt.DELETE("/auth-files/recycle-bin", s.mgmt.PurgeAuthRecycleBin)
+
+		mgmt.PATCH("/auth-files/excluded-models/batch", s.mgmt.PatchAuthFilesExcludedModelsBatch)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
@@ -726,17 +758,14 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 
 	if _, err := os.Stat(filePath); err != nil {
 		if os.IsNotExist(err) {
-			// Synchronously ensure management.html is available with a detached context.
-			// Control panel bootstrap should not be canceled by client disconnects.
-			if !managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository) {
-				c.AbortWithStatus(http.StatusNotFound)
-				return
-			}
-		} else {
-			log.WithError(err).Error("failed to stat management control panel asset")
-			c.AbortWithStatus(http.StatusInternalServerError)
+			go managementasset.EnsureLatestManagementHTML(context.Background(), managementasset.StaticDir(s.configFilePath), cfg.ProxyURL, cfg.RemoteManagement.PanelGitHubRepository)
+			c.AbortWithStatus(http.StatusNotFound)
 			return
 		}
+
+		log.WithError(err).Error("failed to stat management control panel asset")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
 	}
 
 	c.File(filePath)
@@ -1104,10 +1133,14 @@ func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 			return
 		}
 
-		statusCode := err.HTTPStatusCode()
-		if statusCode >= http.StatusInternalServerError {
+		switch {
+		case errors.Is(err, sdkaccess.ErrNoCredentials):
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Missing API key"})
+		case errors.Is(err, sdkaccess.ErrInvalidCredential):
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
+		default:
 			log.Errorf("authentication middleware error: %v", err)
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "Authentication service error"})
 		}
-		c.AbortWithStatusJSON(statusCode, gin.H{"error": err.Message})
 	}
 }

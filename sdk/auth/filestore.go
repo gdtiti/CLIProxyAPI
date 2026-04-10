@@ -134,9 +134,15 @@ func (s *FileTokenStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error)
 			return walkErr
 		}
 		if d.IsDir() {
+			if strings.EqualFold(d.Name(), TrashDirName) && IsTrashPath(dir, path) {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), ".json") {
+			return nil
+		}
+		if IsTrashPath(dir, path) {
 			return nil
 		}
 		auth, err := s.readAuthFile(path, dir)
@@ -260,6 +266,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: nextRefreshAfter,
 	}
+	cliproxyauth.ApplyPersistedRuntimeState(auth, time.Now())
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}

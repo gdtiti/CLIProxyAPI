@@ -429,7 +429,17 @@ func getKiroEndpointConfigs(auth *cliproxyauth.Auth) []kiroEndpointConfig {
 	region := resolveKiroAPIRegion(auth)
 	log.Debugf("kiro: using region %s", region)
 
+	// Build endpoint configs for the specified region
 	configs := buildKiroEndpointConfigs(region)
+
+	// For IDC auth, use Q endpoint with AI_EDITOR origin
+	if auth.Metadata != nil {
+		authMethod, _ := auth.Metadata["auth_method"].(string)
+		if strings.ToLower(authMethod) == "idc" {
+			log.Debugf("kiro: IDC auth, using Q endpoint (region: %s)", region)
+			return configs
+		}
+	}
 
 	preference := getAuthValue(auth, "preferred_endpoint")
 	if preference == "" {
@@ -494,6 +504,8 @@ func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 func (e *KiroExecutor) Identifier() string { return "kiro" }
 
 // applyDynamicFingerprint applies account-specific fingerprint headers to the request.
+// For IDC auth, uses Kiro IDE style headers (matching kiro_proxy Python implementation)
+// For other auth types (Builder ID, Social), uses Kiro IDE style headers
 func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 	accountKey := getAccountKey(auth)
 	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
@@ -1480,6 +1492,54 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	}
 
 	return accessToken, profileArn
+}
+
+// getMachineID extracts machine_id from auth metadata.
+// Returns the stored machine_id or generates a new UUID if not found.
+func getMachineID(auth *cliproxyauth.Auth) string {
+	if auth == nil || auth.Metadata == nil {
+		return uuid.New().String()
+	}
+
+	if machineID, ok := auth.Metadata["machine_id"].(string); ok && machineID != "" {
+		return machineID
+	}
+
+	// Generate new UUID if not found
+	return uuid.New().String()
+}
+
+// isIDCAuth determines whether the auth record is IDC mode.
+func isIDCAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	if authMethod, ok := auth.Metadata["auth_method"].(string); ok && strings.EqualFold(strings.TrimSpace(authMethod), "idc") {
+		return true
+	}
+	if authMethod, ok := auth.Metadata["authMethod"].(string); ok && strings.EqualFold(strings.TrimSpace(authMethod), "idc") {
+		return true
+	}
+	return false
+}
+
+// buildUserAgentHeaders builds User-Agent and X-Amz-User-Agent headers with machine_id.
+// For IDC auth, uses Kiro IDE style headers; otherwise uses Amazon Q CLI style.
+func buildUserAgentHeaders(auth *cliproxyauth.Auth) (userAgent, xAmzUserAgent string) {
+	machineID := getMachineID(auth)
+
+	if isIDCAuth(auth) {
+		// Kiro IDE style headers (from kiro2api - for IDC auth)
+		// Format: aws-sdk-js/1.0.18 KiroIDE-0.2.13-{machineID}
+		userAgent = fmt.Sprintf("aws-sdk-js/1.0.18 ua/2.1 os/darwin#25.0.0 lang/js md/nodejs#20.16.0 api/codewhispererstreaming#1.0.18 m/E KiroIDE-0.2.13-%s", machineID)
+		xAmzUserAgent = fmt.Sprintf("aws-sdk-js/1.0.18 KiroIDE-0.2.13-%s", machineID)
+	} else {
+		// Amazon Q CLI style headers (default)
+		userAgent = "aws-sdk-rust/1.3.9 os/macos lang/rust/1.87.0"
+		xAmzUserAgent = "aws-sdk-rust/1.3.9 ua/2.1 api/ssooidc/1.88.0 os/macos lang/rust/1.87.0 m/E app/AmazonQ-For-CLI"
+	}
+
+	return userAgent, xAmzUserAgent
 }
 
 // findRealThinkingEndTag finds the real </thinking> end tag, skipping false positives.

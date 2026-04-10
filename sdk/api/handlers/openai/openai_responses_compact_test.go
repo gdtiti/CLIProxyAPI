@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -81,40 +82,63 @@ func TestOpenAIResponsesCompactRejectsStream(t *testing.T) {
 }
 
 func TestOpenAIResponsesCompactExecute(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	executor := &compactCaptureExecutor{}
-	manager := coreauth.NewManager(nil, nil, nil)
-	manager.RegisterExecutor(executor)
-
-	auth := &coreauth.Auth{ID: "auth2", Provider: executor.Identifier(), Status: coreauth.StatusActive}
-	if _, err := manager.Register(context.Background(), auth); err != nil {
-		t.Fatalf("Register auth: %v", err)
+	tests := []struct {
+		name    string
+		cfg     sdkconfig.SDKConfig
+		wantAlt string
+	}{
+		{
+			name:    "mimic off keeps compact alt",
+			cfg:     sdkconfig.SDKConfig{},
+			wantAlt: "responses/compact",
+		},
+		{
+			name: "mimic safe reroutes to responses",
+			cfg: sdkconfig.SDKConfig{
+				CodexMimic: internalconfig.CodexMimicConfig{Mode: internalconfig.CodexMimicModeSafe},
+			},
+			wantAlt: "",
+		},
 	}
-	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
-	t.Cleanup(func() {
-		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
-	})
 
-	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
-	h := NewOpenAIResponsesAPIHandler(base)
-	router := gin.New()
-	router.POST("/v1/responses/compact", h.Compact)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gin.SetMode(gin.TestMode)
+			executor := &compactCaptureExecutor{}
+			manager := coreauth.NewManager(nil, nil, nil)
+			manager.RegisterExecutor(executor)
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello"}`))
-	req.Header.Set("Content-Type", "application/json")
-	resp := httptest.NewRecorder()
-	router.ServeHTTP(resp, req)
+			auth := &coreauth.Auth{ID: "auth2", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+			if _, err := manager.Register(context.Background(), auth); err != nil {
+				t.Fatalf("Register auth: %v", err)
+			}
+			registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+			t.Cleanup(func() {
+				registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+			})
 
-	if resp.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
-	}
-	if executor.alt != "responses/compact" {
-		t.Fatalf("alt = %q, want %q", executor.alt, "responses/compact")
-	}
-	if executor.sourceFormat != "openai-response" {
-		t.Fatalf("source format = %q, want %q", executor.sourceFormat, "openai-response")
-	}
-	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
-		t.Fatalf("body = %s", resp.Body.String())
+			base := handlers.NewBaseAPIHandlers(&tt.cfg, manager)
+			h := NewOpenAIResponsesAPIHandler(base)
+			router := gin.New()
+			router.POST("/v1/responses/compact", h.Compact)
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+			req.Header.Set("Content-Type", "application/json")
+			resp := httptest.NewRecorder()
+			router.ServeHTTP(resp, req)
+
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+			}
+			if executor.alt != tt.wantAlt {
+				t.Fatalf("alt = %q, want %q", executor.alt, tt.wantAlt)
+			}
+			if executor.sourceFormat != "openai-response" {
+				t.Fatalf("source format = %q, want %q", executor.sourceFormat, "openai-response")
+			}
+			if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
+				t.Fatalf("body = %s", resp.Body.String())
+			}
+		})
 	}
 }

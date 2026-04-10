@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -262,6 +263,234 @@ func TestApplyCodexHeadersDoesNotInjectClientOnlyHeadersByDefault(t *testing.T) 
 	}
 	if got := req.Header.Get("X-Client-Request-Id"); got != "" {
 		t.Fatalf("X-Client-Request-Id = %q, want empty", got)
+	}
+}
+
+func TestApplyCodexHeadersMimicSafeInjectsCodexIdentityDefaults(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexMimic: config.CodexMimicConfig{Mode: config.CodexMimicModeSafe},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+
+	if got := req.Header.Get("Version"); got != codexVersion {
+		t.Fatalf("Version = %q, want %q", got, codexVersion)
+	}
+	if got := req.Header.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got == "" {
+		t.Fatal("X-Client-Request-Id = empty, want generated value")
+	}
+}
+
+func TestApplyCodexWebsocketHeadersMimicStrictOverridesClientSignature(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexMimic: config.CodexMimicConfig{
+				Mode: config.CodexMimicModeStrict,
+				Strict: config.CodexMimicStrictConfig{
+					ForceTurnMetadata:    true,
+					ForceTurnState:       true,
+					IncludeTimingMetrics: true,
+				},
+			},
+		},
+		CodexHeaderDefaults: config.CodexHeaderDefaults{
+			UserAgent: "config-ua",
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	ctx := contextWithGinHeaders(map[string]string{
+		"User-Agent":  "client-ua",
+		"Originator":  "client-originator",
+		"Version":     "client-version",
+		"OpenAI-Beta": "responses_websockets=v0",
+	})
+
+	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, auth, "", cfg)
+
+	if got := headers.Get("User-Agent"); got != "config-ua" {
+		t.Fatalf("User-Agent = %q, want %q", got, "config-ua")
+	}
+	if got := headers.Get("Originator"); got != codexOriginator {
+		t.Fatalf("Originator = %q, want %q", got, codexOriginator)
+	}
+	if got := headers.Get("Version"); got != codexVersion {
+		t.Fatalf("Version = %q, want %q", got, codexVersion)
+	}
+	if got := headers.Get("x-client-request-id"); got == "" {
+		t.Fatal("x-client-request-id = empty, want generated value")
+	}
+	if got := headers.Get("x-codex-turn-metadata"); got != "{}" {
+		t.Fatalf("x-codex-turn-metadata = %q, want %q", got, "{}")
+	}
+	if got := headers.Get("x-codex-turn-state"); got != "{}" {
+		t.Fatalf("x-codex-turn-state = %q, want %q", got, "{}")
+	}
+	if got := headers.Get("x-responsesapi-include-timing-metrics"); got != "true" {
+		t.Fatalf("x-responsesapi-include-timing-metrics = %q, want %q", got, "true")
+	}
+}
+
+func TestApplyCodexHeadersMimicStrictCanForceTurnMetadata(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexMimic: config.CodexMimicConfig{
+				Mode: config.CodexMimicModeStrict,
+				Strict: config.CodexMimicStrictConfig{
+					ForceTurnMetadata: true,
+				},
+			},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+
+	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != "{}" {
+		t.Fatalf("X-Codex-Turn-Metadata = %q, want %q", got, "{}")
+	}
+}
+
+func TestCodexStableDerivedIDUsesContinuitySeed(t *testing.T) {
+	headersA := make(http.Header)
+	headersA.Set("session_id", "continuity-a")
+	headersB := make(http.Header)
+	headersB.Set("session_id", "continuity-b")
+
+	got1 := codexStableDerivedID("request-id", headersA, nil)
+	got2 := codexStableDerivedID("request-id", headersA, nil)
+	got3 := codexStableDerivedID("request-id", headersB, nil)
+
+	want := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:request-id:continuity-a")).String()
+	if got1 != want {
+		t.Fatalf("codexStableDerivedID() = %q, want %q", got1, want)
+	}
+	if got2 != want {
+		t.Fatalf("codexStableDerivedID() second call = %q, want %q", got2, want)
+	}
+	if got3 == got1 {
+		t.Fatalf("different continuity seeds should produce different IDs, both got %q", got3)
+	}
+}
+
+func TestApplyCodexHeadersMimicStrictCanStabilizeRequestAndTurnMetadata(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/responses", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+	applyCodexContinuityHeaders(req.Header, codexContinuity{Key: "continuity-http"})
+
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexMimic: config.CodexMimicConfig{
+				Mode: config.CodexMimicModeStrict,
+				Strict: config.CodexMimicStrictConfig{
+					StableRequestID: true,
+					StableTurnID:    true,
+				},
+			},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+
+	applyCodexHeaders(req, auth, "oauth-token", true, cfg)
+
+	wantRequestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:request-id:continuity-http")).String()
+	wantTurnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:turn-id:continuity-http")).String()
+	if got := req.Header.Get("X-Client-Request-Id"); got != wantRequestID {
+		t.Fatalf("X-Client-Request-Id = %q, want %q", got, wantRequestID)
+	}
+	if got := req.Header.Get("X-Codex-Turn-Metadata"); got != `{"turn_id":"`+wantTurnID+`"}` {
+		t.Fatalf("X-Codex-Turn-Metadata = %q, want %q", got, `{"turn_id":"`+wantTurnID+`"}`)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersMimicStrictCanStabilizeRequestAndTurnMetadata(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexMimic: config.CodexMimicConfig{
+				Mode: config.CodexMimicModeStrict,
+				Strict: config.CodexMimicStrictConfig{
+					StableRequestID: true,
+					StableTurnID:    true,
+				},
+			},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	headers := http.Header{}
+	applyCodexContinuityHeaders(headers, codexContinuity{Key: "continuity-ws"})
+
+	got := applyCodexWebsocketHeaders(context.Background(), headers, auth, "", cfg)
+
+	wantRequestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:request-id:continuity-ws")).String()
+	wantTurnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:turn-id:continuity-ws")).String()
+	if gotValue := got.Get("x-client-request-id"); gotValue != wantRequestID {
+		t.Fatalf("x-client-request-id = %q, want %q", gotValue, wantRequestID)
+	}
+	if gotValue := got.Get("x-codex-turn-metadata"); gotValue != `{"turn_id":"`+wantTurnID+`"}` {
+		t.Fatalf("x-codex-turn-metadata = %q, want %q", gotValue, `{"turn_id":"`+wantTurnID+`"}`)
+	}
+}
+
+func TestApplyCodexWebsocketHeadersMimicStrictCanStabilizeTurnState(t *testing.T) {
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			CodexMimic: config.CodexMimicConfig{
+				Mode: config.CodexMimicModeStrict,
+				Strict: config.CodexMimicStrictConfig{
+					ForceTurnState:  true,
+					StableRequestID: true,
+					StableTurnID:    true,
+				},
+			},
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		Provider: "codex",
+		Metadata: map[string]any{"email": "user@example.com"},
+	}
+	headers := http.Header{}
+	applyCodexContinuityHeaders(headers, codexContinuity{Key: "continuity-state"})
+
+	got := applyCodexWebsocketHeaders(context.Background(), headers, auth, "", cfg)
+
+	wantRequestID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:request-id:continuity-state")).String()
+	wantTurnID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("cli-proxy-api:codex:turn-id:continuity-state")).String()
+	state := got.Get("x-codex-turn-state")
+	if gotValue := gjson.Get(state, "turn_id").String(); gotValue != wantTurnID {
+		t.Fatalf("x-codex-turn-state.turn_id = %q, want %q", gotValue, wantTurnID)
+	}
+	if gotValue := gjson.Get(state, "request_id").String(); gotValue != wantRequestID {
+		t.Fatalf("x-codex-turn-state.request_id = %q, want %q", gotValue, wantRequestID)
 	}
 }
 

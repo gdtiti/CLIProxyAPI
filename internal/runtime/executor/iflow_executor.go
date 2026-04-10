@@ -146,6 +146,18 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
+
+	// 406 专项兜底：遇到 406 时重试一次（无签名头）
+	if httpResp.StatusCode == http.StatusNotAcceptable {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("iflow executor: close 406 response body error: %v", errClose)
+		}
+		httpResp, err = e.retryWithoutSignature(ctx, httpReq, body, false)
+		if err != nil {
+			recordAPIResponseError(ctx, e.cfg, err)
+			return resp, err
+		}
+	}
 	defer func() {
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("iflow executor: close response body error: %v", errClose)
@@ -258,6 +270,18 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if err != nil {
 		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
+	}
+
+	// 406 专项兜底：遇到 406 时重试一次（无签名头）
+	if httpResp.StatusCode == http.StatusNotAcceptable {
+		if errClose := httpResp.Body.Close(); errClose != nil {
+			log.Errorf("iflow executor: close 406 response body error: %v", errClose)
+		}
+		httpResp, err = e.retryWithoutSignature(ctx, httpReq, body, true)
+		if err != nil {
+			helps.RecordAPIResponseError(ctx, e.cfg, err)
+			return nil, err
+		}
 	}
 
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
@@ -481,11 +505,61 @@ func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 		r.Header.Set("x-iflow-signature", signature)
 	}
 
-	if stream {
-		r.Header.Set("Accept", "text/event-stream")
-	} else {
-		r.Header.Set("Accept", "application/json")
+	// 添加 conversation-id，始终带键（与 iFlow 官方行为一致）
+	conversationID := generateUUID()
+	r.Header.Set("conversation-id", conversationID)
+
+	// 不再主动设置 Accept 头，使用 HTTP 客户端默认行为
+	// 这避免了某些上游节点因显式 Accept: text/event-stream 而返回 406
+	_ = stream
+}
+
+func (e *IFlowExecutor) retryWithoutSignature(ctx context.Context, httpReq *http.Request, body []byte, stream bool) (*http.Response, error) {
+	if httpReq == nil {
+		return nil, fmt.Errorf("iflow executor: request is nil")
 	}
+	if ctx == nil {
+		ctx = httpReq.Context()
+	}
+
+	newReq, err := http.NewRequestWithContext(ctx, httpReq.Method, httpReq.URL.String(), bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+
+	// 复制原请求的头，但移除签名相关头（使用 CanonicalMIMEHeaderKey 进行大小写不敏感比较）
+	for key, values := range httpReq.Header {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if canonicalKey != "X-Iflow-Signature" && canonicalKey != "X-Iflow-Timestamp" {
+			for _, value := range values {
+				newReq.Header.Add(key, value)
+			}
+		}
+	}
+
+	// 重新设置非签名的基础头
+	apiKey := ""
+	if authHeader := httpReq.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		apiKey = strings.TrimPrefix(authHeader, "Bearer ")
+	}
+
+	// 重新生成不带签名的头
+	newReq.Header.Set("Content-Type", "application/json")
+	newReq.Header.Set("User-Agent", iflowUserAgent)
+	sessionID := "session-" + generateUUID()
+	newReq.Header.Set("session-id", sessionID)
+	conversationID := generateUUID()
+	newReq.Header.Set("conversation-id", conversationID)
+	_ = stream
+
+	if apiKey != "" {
+		newReq.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	log.Debugf("iflow: retrying without signature headers due to 406")
+
+	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, nil, 0)
+	return httpClient.Do(newReq)
 }
 
 // createIFlowSignature generates HMAC-SHA256 signature for iFlow API requests.
