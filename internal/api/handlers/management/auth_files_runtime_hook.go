@@ -398,6 +398,7 @@ func (h *Handler) handleManagedAuthDisable(ctx context.Context, auth *coreauth.A
 		return fmt.Errorf("unmarshal auth file: %w", err)
 	}
 	metadata["disabled"] = true
+	coreauth.MarkAuthMaintenanceAutoRecovery(metadata, reason, time.Now())
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return fmt.Errorf("marshal auth file: %w", err)

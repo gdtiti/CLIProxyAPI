@@ -62,6 +62,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesAuthFileAfterUnauthorizedThreshold(t
 	if metadata["disabled"] != true {
 		t.Fatalf("expected auth file to be written with disabled=true, metadata=%v", metadata)
 	}
+	if metadata[coreauth.AuthMaintenanceAutoRecoveryMetadataKey] != true {
+		t.Fatalf("expected auth file to carry auto-recovery marker, metadata=%v", metadata)
+	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
 	if !ok || updated == nil {
@@ -72,6 +75,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesAuthFileAfterUnauthorizedThreshold(t
 	}
 	if updated.StatusMessage != "disabled after unauthorized threshold" {
 		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after unauthorized threshold")
+	}
+	if !coreauth.IsAuthMaintenanceAutoRecoverable(updated) {
+		t.Fatalf("expected runtime auth to carry auto-recovery marker")
 	}
 }
 
@@ -120,6 +126,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterMaxRequestCount(t 
 	if metadata["disabled"] != true {
 		t.Fatalf("expected auth file to be written with disabled=true, metadata=%v", metadata)
 	}
+	if metadata[coreauth.AuthMaintenanceAutoRecoveryMetadataKey] != true {
+		t.Fatalf("expected auth file to carry auto-recovery marker, metadata=%v", metadata)
+	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
 	if !ok || updated == nil {
@@ -130,6 +139,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterMaxRequestCount(t 
 	}
 	if updated.StatusMessage != "disabled after codex_max_request_count" {
 		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after codex_max_request_count")
+	}
+	if !coreauth.IsAuthMaintenanceAutoRecoverable(updated) {
+		t.Fatalf("expected runtime auth to carry auto-recovery marker")
 	}
 }
 
@@ -217,6 +229,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthor
 	if metadata["disabled"] != true {
 		t.Fatalf("expected auth file to be written with disabled=true, metadata=%v", metadata)
 	}
+	if metadata[coreauth.AuthMaintenanceAutoRecoveryMetadataKey] != true {
+		t.Fatalf("expected auth file to carry auto-recovery marker, metadata=%v", metadata)
+	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
 	if !ok || updated == nil {
@@ -227,6 +242,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthor
 	}
 	if updated.StatusMessage != "disabled after codex_quota_probe_401" {
 		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after codex_quota_probe_401")
+	}
+	if !coreauth.IsAuthMaintenanceAutoRecoverable(updated) {
+		t.Fatalf("expected runtime auth to carry auto-recovery marker")
 	}
 }
 
@@ -344,6 +362,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnCodexUsageLimitReached(t *
 	if disabled, _ := metadata["disabled"].(bool); !disabled {
 		t.Fatalf("expected auth file disabled=true, got %#v", metadata["disabled"])
 	}
+	if metadata[coreauth.AuthMaintenanceAutoRecoveryMetadataKey] != true {
+		t.Fatalf("expected auth file to carry auto-recovery marker, metadata=%v", metadata)
+	}
 
 	updated, ok := manager.GetByID("codex-auth.json")
 	if !ok || updated == nil {
@@ -354,6 +375,9 @@ func TestAuthRuntimeMaintenanceHook_DisablesAuthFileOnCodexUsageLimitReached(t *
 	}
 	if updated.StatusMessage != "disabled after usage_limit_reached" {
 		t.Fatalf("StatusMessage = %q, want %q", updated.StatusMessage, "disabled after usage_limit_reached")
+	}
+	if !coreauth.IsAuthMaintenanceAutoRecoverable(updated) {
+		t.Fatalf("expected runtime auth to carry auto-recovery marker")
 	}
 }
 
