@@ -150,3 +150,41 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 		t.Fatalf("updated config file does not contain new-agent: %s", string(configBytes))
 	}
 }
+
+func TestCodexAuthPagesExposeEmbeddedAndInjectedViews(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{}
+	router := gin.New()
+	router.GET("/management-codex-auth.html", handler.ServeCodexAuthPage)
+	router.GET("/management-codex-auth-inject.js", handler.ServeCodexAuthInjectScript)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/management-codex-auth.html", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Codex Auth Center") {
+		t.Fatalf("page body missing title: %s", body)
+	}
+	if !strings.Contains(body, "codex-management-key") {
+		t.Fatalf("page body missing management key sync listener: %s", body)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/management-codex-auth-inject.js", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inject script status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	scriptBody := rec.Body.String()
+	if !strings.Contains(scriptBody, "/management-codex-auth.html") {
+		t.Fatalf("inject script missing iframe target: %s", scriptBody)
+	}
+	if !strings.Contains(scriptBody, "Codex 管理") {
+		t.Fatalf("inject script missing launcher text: %s", scriptBody)
+	}
+}

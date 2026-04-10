@@ -163,6 +163,10 @@ func (h *Handler) ServeCodexAuthPage(c *gin.Context) {
 	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(codexAuthManagementPage))
 }
 
+func (h *Handler) ServeCodexAuthInjectScript(c *gin.Context) {
+	c.Data(http.StatusOK, "application/javascript; charset=utf-8", []byte(codexAuthInjectScript))
+}
+
 func filterCodexPayloadRules(rules []config.PayloadRule) []config.PayloadRule {
 	filtered := make([]config.PayloadRule, 0, len(rules))
 	for _, rule := range rules {
@@ -578,6 +582,110 @@ const codexAuthManagementPage = `<!doctype html>
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&#39;');
     }
+
+    window.addEventListener('message', function(event) {
+      if (!event || !event.data || event.data.type !== 'codex-management-key') {
+        return;
+      }
+      document.getElementById('key').value = typeof event.data.value === 'string' ? event.data.value : '';
+    });
   </script>
 </body>
 </html>`
+
+const codexAuthInjectScript = `(function () {
+  if (window.__codexAuthCenterInjected) {
+    return;
+  }
+  window.__codexAuthCenterInjected = true;
+
+  var iframe = null;
+  var overlay = null;
+  var keyInput = null;
+
+  var styles = document.createElement('style');
+  styles.textContent = [
+    '#codex-auth-launcher{position:fixed;right:24px;bottom:24px;z-index:2147483640;display:inline-flex;align-items:center;gap:8px;padding:12px 16px;border:none;border-radius:999px;background:#2563eb;color:#fff;font:600 14px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 12px 30px rgba(15,23,42,.35);cursor:pointer;}',
+    '#codex-auth-overlay{position:fixed;inset:0;z-index:2147483641;display:none;background:rgba(15,23,42,.72);backdrop-filter:blur(4px);}',
+    '#codex-auth-overlay[data-open="true"]{display:flex;align-items:center;justify-content:center;padding:32px;}',
+    '#codex-auth-modal{width:min(1280px,96vw);height:min(900px,92vh);display:flex;flex-direction:column;background:#020617;border:1px solid #1e293b;border-radius:18px;overflow:hidden;box-shadow:0 24px 80px rgba(15,23,42,.55);}',
+    '#codex-auth-header{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #1e293b;background:#0f172a;color:#e2e8f0;font:500 14px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}',
+    '#codex-auth-header strong{font-size:16px;margin-right:auto;}',
+    '#codex-auth-key{width:min(320px,42vw);padding:10px 12px;border:1px solid #334155;border-radius:10px;background:#020617;color:#e2e8f0;}',
+    '#codex-auth-close{padding:10px 14px;border:none;border-radius:10px;background:#1d4ed8;color:#fff;cursor:pointer;}',
+    '#codex-auth-frame{flex:1;border:none;background:#020617;}'
+  ].join('');
+  document.head.appendChild(styles);
+
+  var launcher = document.createElement('button');
+  launcher.type = 'button';
+  launcher.id = 'codex-auth-launcher';
+  launcher.textContent = 'Codex 管理';
+  launcher.addEventListener('click', function () {
+    ensureOverlay();
+    overlay.setAttribute('data-open', 'true');
+    syncKeyToFrame();
+  });
+  document.body.appendChild(launcher);
+
+  function ensureOverlay() {
+    if (overlay) {
+      return;
+    }
+
+    overlay = document.createElement('div');
+    overlay.id = 'codex-auth-overlay';
+    overlay.addEventListener('click', function (event) {
+      if (event.target === overlay) {
+        overlay.removeAttribute('data-open');
+      }
+    });
+
+    var modal = document.createElement('div');
+    modal.id = 'codex-auth-modal';
+
+    var header = document.createElement('div');
+    header.id = 'codex-auth-header';
+
+    var title = document.createElement('strong');
+    title.textContent = 'Codex Auth Center';
+    header.appendChild(title);
+
+    keyInput = document.createElement('input');
+    keyInput.id = 'codex-auth-key';
+    keyInput.type = 'password';
+    keyInput.placeholder = '同步 X-Management-Key';
+    keyInput.addEventListener('input', syncKeyToFrame);
+    header.appendChild(keyInput);
+
+    var closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.id = 'codex-auth-close';
+    closeButton.textContent = '关闭';
+    closeButton.addEventListener('click', function () {
+      overlay.removeAttribute('data-open');
+    });
+    header.appendChild(closeButton);
+
+    iframe = document.createElement('iframe');
+    iframe.id = 'codex-auth-frame';
+    iframe.src = '/management-codex-auth.html';
+    iframe.referrerPolicy = 'same-origin';
+    iframe.addEventListener('load', syncKeyToFrame);
+
+    modal.appendChild(header);
+    modal.appendChild(iframe);
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+  }
+
+  function syncKeyToFrame() {
+    if (!iframe || !iframe.contentWindow || !keyInput) {
+      return;
+    }
+    iframe.contentWindow.postMessage({
+      type: 'codex-management-key',
+      value: keyInput.value || ''
+    }, window.location.origin);
+  }
+})();`

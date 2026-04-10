@@ -69,6 +69,37 @@ func TestHealthz(t *testing.T) {
 	}
 }
 
+func TestManagementControlPanelInjectsCodexLauncherScript(t *testing.T) {
+	server := newTestServer(t)
+
+	assetPath := filepath.Join(filepath.Dir(server.configFilePath), "static", "management.html")
+	if err := os.MkdirAll(filepath.Dir(assetPath), 0o755); err != nil {
+		t.Fatalf("failed to create static dir: %v", err)
+	}
+	originalHTML := "<!doctype html><html><head><title>management</title></head><body><main>panel</main></body></html>"
+	if err := os.WriteFile(assetPath, []byte(originalHTML), 0o644); err != nil {
+		t.Fatalf("failed to write management asset: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/management.html", nil)
+	rr := httptest.NewRecorder()
+	server.engine.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "<main>panel</main>") {
+		t.Fatalf("response body missing original content: %s", body)
+	}
+	if !strings.Contains(body, managementCodexInjectTag) {
+		t.Fatalf("response body missing inject tag: %s", body)
+	}
+	if !strings.Contains(rr.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("unexpected content-type: %s", rr.Header().Get("Content-Type"))
+	}
+}
+
 func TestAmpProviderModelRoutes(t *testing.T) {
 	testCases := []struct {
 		name         string
