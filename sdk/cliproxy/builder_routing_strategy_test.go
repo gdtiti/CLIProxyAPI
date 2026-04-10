@@ -1,8 +1,10 @@
 package cliproxy
 
 import (
+	"fmt"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -96,7 +98,11 @@ func TestBuilderBuild_WiresRequestAuditHookWhenEnabled(t *testing.T) {
 	if svc == nil || svc.coreManager == nil {
 		t.Fatalf("Build() returned nil service/coreManager")
 	}
-	if _, ok := svc.coreManager.Hook().(*requestAuditHook); !ok {
-		t.Fatalf("coreManager.Hook() = %T, want *requestAuditHook", svc.coreManager.Hook())
+	hook := svc.coreManager.Hook()
+	if _, ok := hook.(*requestAuditHook); ok {
+		return
+	}
+	if !strings.Contains(fmt.Sprintf("%#v", hook), "requestAuditHook") {
+		t.Fatalf("coreManager.Hook() = %T, want hook chain containing *requestAuditHook", hook)
 	}
 }
