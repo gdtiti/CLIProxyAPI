@@ -124,6 +124,24 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	if len(configBody.Payload.Default) != 1 {
 		t.Fatalf("len(configBody.Payload.Default) = %d, want 1 pure codex rule", len(configBody.Payload.Default))
 	}
+	if configBody.Guide.ContextWindows.GPT5MaxContextTokens != 400000 {
+		t.Fatalf("guide.context_windows.gpt5_max_context_tokens = %d, want 400000", configBody.Guide.ContextWindows.GPT5MaxContextTokens)
+	}
+	if configBody.Guide.ContextWindows.GPT5SupportsOfficialOneMillion {
+		t.Fatalf("guide.context_windows.gpt5_supports_official_one_million = true, want false")
+	}
+	if configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily != "gpt-4.1" {
+		t.Fatalf("guide.context_windows.official_one_million_recommended_family = %q, want %q", configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily, "gpt-4.1")
+	}
+	if len(configBody.Guide.FieldHints) == 0 {
+		t.Fatalf("len(configBody.Guide.FieldHints) = 0, want hints")
+	}
+	if len(configBody.Guide.Presets) == 0 {
+		t.Fatalf("len(configBody.Guide.Presets) = 0, want presets")
+	}
+	if configBody.Notes["one_million_context"] == nil {
+		t.Fatalf("notes.one_million_context missing")
+	}
 
 	putBody := `{"codex_header_defaults":{"user_agent":"new-agent","beta_features":"beta-b"},"payload":{"default":[{"models":[{"name":"gpt-*","protocol":"codex"}],"params":{"instructions":"new"}}],"default_raw":[],"override":[],"override_raw":[],"filter":[]}}`
 	rec = httptest.NewRecorder()

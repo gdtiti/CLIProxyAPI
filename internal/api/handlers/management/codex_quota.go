@@ -28,12 +28,49 @@ type codexHeaderDefaultsResponse struct {
 type codexAuthConfigResponse struct {
 	CodexHeaderDefaults codexHeaderDefaultsResponse `json:"codex_header_defaults"`
 	Payload             codexPayloadConfigResponse  `json:"payload"`
+	Guide               codexConfigGuideResponse    `json:"guide"`
 	Notes               map[string]any              `json:"notes"`
 }
 
 type codexAuthConfigRequest struct {
 	CodexHeaderDefaults codexHeaderDefaultsResponse `json:"codex_header_defaults"`
 	Payload             codexPayloadConfigResponse  `json:"payload"`
+}
+
+type codexConfigGuideResponse struct {
+	ContextWindows codexContextWindowsGuideResponse `json:"context_windows"`
+	FieldHints     []codexPayloadFieldHintResponse  `json:"field_hints"`
+	Presets        []codexPayloadPresetResponse     `json:"presets"`
+	OfficialDocs   map[string]string                `json:"official_docs"`
+}
+
+type codexContextWindowsGuideResponse struct {
+	GPT5MaxContextTokens                int    `json:"gpt5_max_context_tokens"`
+	GPT41MaxContextTokens               int    `json:"gpt41_max_context_tokens"`
+	GPT5SupportsOfficialOneMillion      bool   `json:"gpt5_supports_official_one_million"`
+	OfficialOneMillionRecommendedFamily string `json:"official_one_million_recommended_family"`
+}
+
+type codexPayloadFieldHintResponse struct {
+	Path        string   `json:"path"`
+	Label       string   `json:"label"`
+	ValueType   string   `json:"value_type"`
+	RuleTargets []string `json:"rule_targets"`
+	Description string   `json:"description"`
+	Enum        []string `json:"enum,omitempty"`
+	Example     any      `json:"example,omitempty"`
+	Official    bool     `json:"official"`
+}
+
+type codexPayloadPresetResponse struct {
+	ID          string                    `json:"id"`
+	Title       string                    `json:"title"`
+	Description string                    `json:"description"`
+	RuleTarget  string                    `json:"rule_target"`
+	Raw         bool                      `json:"raw"`
+	Official    bool                      `json:"official"`
+	Models      []config.PayloadModelRule `json:"models"`
+	Params      map[string]any            `json:"params"`
 }
 
 func (h *Handler) GetCodexAuthQuota(c *gin.Context) {
@@ -112,9 +149,95 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 			OverrideRaw: filterCodexPayloadRules(h.cfg.Payload.OverrideRaw),
 			Filter:      filterCodexPayloadFilterRules(h.cfg.Payload.Filter),
 		},
+		Guide: codexConfigGuideResponse{
+			ContextWindows: codexContextWindowsGuideResponse{
+				GPT5MaxContextTokens:                400000,
+				GPT41MaxContextTokens:               1047576,
+				GPT5SupportsOfficialOneMillion:      false,
+				OfficialOneMillionRecommendedFamily: "gpt-4.1",
+			},
+			FieldHints: []codexPayloadFieldHintResponse{
+				{
+					Path:        "instructions",
+					Label:       "Instructions",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Sets top-level instructions for Codex/OpenAI requests.",
+					Example:     "Prefer concise answers and keep markdown minimal.",
+					Official:    true,
+				},
+				{
+					Path:        "reasoning.effort",
+					Label:       "Reasoning effort",
+					ValueType:   "string",
+					RuleTargets: []string{"override"},
+					Description: "Controls GPT-5 reasoning depth.",
+					Enum:        []string{"minimal", "low", "medium", "high"},
+					Example:     "high",
+					Official:    true,
+				},
+				{
+					Path:        "text.verbosity",
+					Label:       "Text verbosity",
+					ValueType:   "string",
+					RuleTargets: []string{"override"},
+					Description: "Controls GPT-5 response verbosity.",
+					Enum:        []string{"low", "medium", "high"},
+					Example:     "low",
+					Official:    true,
+				},
+				{
+					Path:        "max_output_tokens",
+					Label:       "Max output tokens",
+					ValueType:   "number",
+					RuleTargets: []string{"default", "override"},
+					Description: "Caps response output tokens for supported Codex/OpenAI requests.",
+					Example:     32768,
+					Official:    true,
+				},
+			},
+			Presets: []codexPayloadPresetResponse{
+				{
+					ID:          "gpt5_high_reasoning",
+					Title:       "GPT-5 high reasoning",
+					Description: "Use payload.override to raise GPT-5 reasoning effort.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"reasoning.effort": "high"},
+				},
+				{
+					ID:          "gpt5_low_verbosity",
+					Title:       "GPT-5 low verbosity",
+					Description: "Use payload.override to make GPT-5 outputs shorter.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"text.verbosity": "low"},
+				},
+				{
+					ID:          "shared_instructions",
+					Title:       "Shared instructions",
+					Description: "Use payload.default to inject shared instructions when the caller does not provide them.",
+					RuleTarget:  "default",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "*", Protocol: "codex"}},
+					Params:      map[string]any{"instructions": "Keep answers concise."},
+				},
+			},
+			OfficialDocs: map[string]string{
+				"models":          "https://platform.openai.com/docs/models",
+				"reasoning":       "https://platform.openai.com/docs/guides/reasoning",
+				"text_generation": "https://platform.openai.com/docs/guides/text?api-mode=responses",
+			},
+		},
 		Notes: map[string]any{
-			"custom_params":              "Use payload rules to add Codex-specific request fields such as instructions or custom context controls.",
-			"one_million_context":        "This repository does not expose a dedicated 1m context field. Configure it through Codex payload rules if your upstream accepts it.",
+			"custom_params":              "Use payload rules to add Codex-specific request fields or upstream-specific custom fields.",
+			"one_million_context":        "OpenAI public docs list GPT-5 with a 400000-token context window. Official 1M context is documented for GPT-4.1 family, not GPT-5.",
+			"one_million_context_config": "If your upstream is not OpenAI and exposes a custom 1m flag, add that custom field through payload rules. This repository does not define an official GPT-5 1m switch.",
 			"recovered_tokens_available": false,
 		},
 	})

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -14,11 +15,31 @@ import (
 // the Auth.ProxyURL value. It caches transports per proxy URL string.
 type defaultRoundTripperProvider struct {
 	mu    sync.RWMutex
+	cfg   *internalconfig.Config
 	cache map[string]http.RoundTripper
 }
 
-func newDefaultRoundTripperProvider() *defaultRoundTripperProvider {
-	return &defaultRoundTripperProvider{cache: make(map[string]http.RoundTripper)}
+func newDefaultRoundTripperProvider(cfg *internalconfig.Config) *defaultRoundTripperProvider {
+	return &defaultRoundTripperProvider{
+		cfg:   cfg,
+		cache: make(map[string]http.RoundTripper),
+	}
+}
+
+func (p *defaultRoundTripperProvider) resolveProxy(auth *coreauth.Auth) (string, bool) {
+	if auth == nil {
+		return "", false
+	}
+	if p.cfg != nil && p.cfg.IgnoreAuthFileProxyURL && strings.TrimSpace(auth.FileName) != "" {
+		return strings.TrimSpace(p.cfg.ProxyURL), true
+	}
+	if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
+		return proxyStr, false
+	}
+	if p.cfg != nil {
+		return strings.TrimSpace(p.cfg.ProxyURL), false
+	}
+	return "", false
 }
 
 // RoundTripperFor implements coreauth.RoundTripperProvider.
@@ -26,8 +47,11 @@ func (p *defaultRoundTripperProvider) RoundTripperFor(auth *coreauth.Auth) http.
 	if auth == nil {
 		return nil
 	}
-	proxyStr := strings.TrimSpace(auth.ProxyURL)
+	proxyStr, forceDirect := p.resolveProxy(auth)
 	if proxyStr == "" {
+		if forceDirect {
+			return proxyutil.NewDirectTransport()
+		}
 		return nil
 	}
 	p.mu.RLock()
