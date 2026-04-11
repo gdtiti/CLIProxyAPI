@@ -48,6 +48,26 @@ func TestResolveAuthProxyURLIgnoresFileBackedProxyWhenConfigured(t *testing.T) {
 	}
 }
 
+func TestResolveAuthProxyURLIgnoresPathBackedProxyWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		ProxyURL: "http://file-proxy.example.com:8080",
+		Attributes: map[string]string{
+			"path": "auths/codex.json",
+		},
+	}
+
+	if got := ResolveAuthProxyURL(cfg, auth); got != "" {
+		t.Fatalf("ResolveAuthProxyURL() = %q, want empty", got)
+	}
+}
+
 func TestResolveAuthProxyURLKeepsConfigBackedProxyWhenConfigured(t *testing.T) {
 	t.Parallel()
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -113,7 +114,38 @@ func (h *Handler) GetCodexAuthQuota(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex quota service unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accounts": service.ListSnapshots()})
+	items := service.ListSnapshots()
+	sortBy, sortOrder, err := parseListSort(c, "auth_index", "asc", allowedCodexQuotaSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		diff := compareCodexSnapshotViews(items[i], items[j], sortBy)
+		if diff == 0 {
+			diff = compareCodexSnapshotViews(items[i], items[j], "auth_index")
+		}
+		if diff == 0 {
+			diff = compareStringsFold(items[i].AuthID, items[j].AuthID)
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+	paged, pageInfo, err := parseListPageInfo(c, items, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"accounts":   paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+	})
 }
 
 func (h *Handler) GetCodexAuthQuotaByIndex(c *gin.Context) {
@@ -154,7 +186,42 @@ func (h *Handler) GetCodexAuthEvents(c *gin.Context) {
 		limit = value
 	}
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
-	c.JSON(http.StatusOK, gin.H{"events": service.ListEvents(authIndex, limit)})
+	items := service.ListEvents(authIndex, 0)
+	sortBy, sortOrder, err := parseListSort(c, "created_at", "desc", allowedCodexEventSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		diff := compareCodexEvents(items[i], items[j], sortBy)
+		if diff == 0 {
+			diff = compareTimes(items[i].CreatedAt, items[j].CreatedAt)
+		}
+		if diff == 0 {
+			diff = compareStringsFold(items[i].ID, items[j].ID)
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	paged, pageInfo, err := parseListPageInfo(c, items, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"events":     paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+		"limit":      limit,
+	})
 }
 
 func (h *Handler) GetCodexAuthUsage(c *gin.Context) {
@@ -163,7 +230,38 @@ func (h *Handler) GetCodexAuthUsage(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex quota service unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"usage": service.ListRollups()})
+	items := service.ListRollups()
+	sortBy, sortOrder, err := parseListSort(c, "auth_index", "asc", allowedCodexUsageSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		diff := compareCodexUsageRollups(items[i], items[j], sortBy)
+		if diff == 0 {
+			diff = compareCodexUsageRollups(items[i], items[j], "auth_index")
+		}
+		if diff == 0 {
+			diff = compareStringsFold(items[i].AuthID, items[j].AuthID)
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+	paged, pageInfo, err := parseListPageInfo(c, items, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"usage":      paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+	})
 }
 
 func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
@@ -555,6 +653,129 @@ func (h *Handler) PutCodexAuthConfig(c *gin.Context) {
 	h.mu.Unlock()
 
 	h.persist(c)
+}
+
+var allowedCodexQuotaSortFields = map[string]struct{}{
+	"account":           {},
+	"auth_id":           {},
+	"auth_index":        {},
+	"last_refreshed_at": {},
+	"last_requested_at": {},
+	"next_recover_at":   {},
+	"quota_exceeded":    {},
+	"request_count":     {},
+	"status":            {},
+	"total_tokens":      {},
+	"updated_at":        {},
+}
+
+var allowedCodexUsageSortFields = map[string]struct{}{
+	"account":           {},
+	"auth_id":           {},
+	"auth_index":        {},
+	"avg_total_tokens":  {},
+	"cached_tokens":     {},
+	"input_tokens":      {},
+	"last_requested_at": {},
+	"output_tokens":     {},
+	"reasoning_tokens":  {},
+	"request_count":     {},
+	"total_tokens":      {},
+	"updated_at":        {},
+}
+
+var allowedCodexEventSortFields = map[string]struct{}{
+	"auth_id":        {},
+	"auth_index":     {},
+	"created_at":     {},
+	"event_type":     {},
+	"http_status":    {},
+	"quota_exceeded": {},
+	"request_count":  {},
+	"total_tokens":   {},
+}
+
+func compareCodexSnapshotViews(left, right codexquota.SnapshotView, sortBy string) int {
+	switch sortBy {
+	case "account":
+		return compareStringsFold(left.Account, right.Account)
+	case "auth_id":
+		return compareStringsFold(left.AuthID, right.AuthID)
+	case "last_refreshed_at":
+		return compareTimes(left.LastRefreshedAt, right.LastRefreshedAt)
+	case "last_requested_at":
+		return compareTimes(left.Usage.LastRequestedAt, right.Usage.LastRequestedAt)
+	case "next_recover_at":
+		return compareTimes(left.NextRecoverAt, right.NextRecoverAt)
+	case "quota_exceeded":
+		return compareBools(left.QuotaExceeded, right.QuotaExceeded)
+	case "request_count":
+		return compareInt64s(left.Usage.RequestCount, right.Usage.RequestCount)
+	case "status":
+		return compareStringsFold(left.Status, right.Status)
+	case "total_tokens":
+		return compareInt64s(left.Usage.TotalTokens, right.Usage.TotalTokens)
+	case "updated_at":
+		return compareTimes(left.UpdatedAt, right.UpdatedAt)
+	case "auth_index":
+		fallthrough
+	default:
+		return compareStringsFold(left.AuthIndex, right.AuthIndex)
+	}
+}
+
+func compareCodexUsageRollups(left, right codexquota.UsageRollup, sortBy string) int {
+	switch sortBy {
+	case "account":
+		return compareStringsFold(left.Account, right.Account)
+	case "auth_id":
+		return compareStringsFold(left.AuthID, right.AuthID)
+	case "avg_total_tokens":
+		return compareFloat64s(left.AvgTotalTokens, right.AvgTotalTokens)
+	case "cached_tokens":
+		return compareInt64s(left.CachedTokens, right.CachedTokens)
+	case "input_tokens":
+		return compareInt64s(left.InputTokens, right.InputTokens)
+	case "last_requested_at":
+		return compareTimes(left.LastRequestedAt, right.LastRequestedAt)
+	case "output_tokens":
+		return compareInt64s(left.OutputTokens, right.OutputTokens)
+	case "reasoning_tokens":
+		return compareInt64s(left.ReasoningTokens, right.ReasoningTokens)
+	case "request_count":
+		return compareInt64s(left.RequestCount, right.RequestCount)
+	case "total_tokens":
+		return compareInt64s(left.TotalTokens, right.TotalTokens)
+	case "updated_at":
+		return compareTimes(left.UpdatedAt, right.UpdatedAt)
+	case "auth_index":
+		fallthrough
+	default:
+		return compareStringsFold(left.AuthIndex, right.AuthIndex)
+	}
+}
+
+func compareCodexEvents(left, right codexquota.Event, sortBy string) int {
+	switch sortBy {
+	case "auth_id":
+		return compareStringsFold(left.AuthID, right.AuthID)
+	case "auth_index":
+		return compareStringsFold(left.AuthIndex, right.AuthIndex)
+	case "event_type":
+		return compareStringsFold(left.EventType, right.EventType)
+	case "http_status":
+		return compareInts(left.HTTPStatus, right.HTTPStatus)
+	case "quota_exceeded":
+		return compareBools(left.QuotaExceeded, right.QuotaExceeded)
+	case "request_count":
+		return compareInt64s(left.RequestCount, right.RequestCount)
+	case "total_tokens":
+		return compareInt64s(left.TotalTokens, right.TotalTokens)
+	case "created_at":
+		fallthrough
+	default:
+		return compareTimes(left.CreatedAt, right.CreatedAt)
+	}
 }
 
 func filterCodexPayloadRules(rules []config.PayloadRule) []config.PayloadRule {

@@ -24,7 +24,7 @@ func ResolveAuthProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	if auth == nil {
 		return ""
 	}
-	if cfg != nil && cfg.IgnoreAuthFileProxyURL && strings.TrimSpace(auth.FileName) != "" {
+	if cfg != nil && cfg.IgnoreAuthFileProxyURL && isFileBackedAuth(auth) {
 		return ""
 	}
 	return strings.TrimSpace(auth.ProxyURL)
@@ -42,7 +42,34 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 }
 
 func authFileProxyIgnored(cfg *config.Config, auth *cliproxyauth.Auth) bool {
-	return cfg != nil && cfg.IgnoreAuthFileProxyURL && auth != nil && strings.TrimSpace(auth.FileName) != ""
+	return cfg != nil && cfg.IgnoreAuthFileProxyURL && isFileBackedAuth(auth)
+}
+
+func isFileBackedAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if strings.TrimSpace(auth.FileName) != "" {
+		return true
+	}
+	if auth.Attributes != nil {
+		if isLikelyAuthFileReference(auth.Attributes["path"]) {
+			return true
+		}
+		if isLikelyAuthFileReference(auth.Attributes["source"]) {
+			return true
+		}
+	}
+	return isLikelyAuthFileReference(auth.ID)
+}
+
+func isLikelyAuthFileReference(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(value, "\\", "/"))
+	return strings.HasSuffix(normalized, ".json")
 }
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:

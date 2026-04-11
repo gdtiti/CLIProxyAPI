@@ -205,3 +205,95 @@ func TestListAuthFiles_ExposesQuotaWindowFieldsAfterExecutionFailure(t *testing.
 		t.Fatalf("status_display = %v, want %q", got, "quota exhausted (5h window)")
 	}
 }
+
+func TestListAuthFiles_SupportsSortAndPagination(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mgr := coreauth.NewManager(nil, nil, nil)
+	registerAuth := func(id, name, email string, priority int) {
+		t.Helper()
+		auth := &coreauth.Auth{
+			ID:       id,
+			Provider: "codex",
+			FileName: name,
+			Attributes: map[string]string{
+				"runtime_only": "true",
+				"priority":     fmt.Sprintf("%d", priority),
+			},
+			Metadata: map[string]any{
+				"email": email,
+			},
+		}
+		if _, err := mgr.Register(context.Background(), auth); err != nil {
+			t.Fatalf("register auth %s: %v", id, err)
+		}
+	}
+
+	registerAuth("auth-a", "a.json", "a@example.com", 1)
+	registerAuth("auth-b", "b.json", "b@example.com", 3)
+	registerAuth("auth-c", "c.json", "c@example.com", 2)
+
+	h := &Handler{authManager: mgr}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?sort_by=priority&sort_order=desc&page=2&page_size=1", nil)
+
+	h.ListAuthFiles(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("ListAuthFiles status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var payload struct {
+		Files     []map[string]any `json:"files"`
+		Total     int              `json:"total"`
+		Page      int              `json:"page"`
+		PageSize  int              `json:"page_size"`
+		SortBy    string           `json:"sort_by"`
+		SortOrder string           `json:"sort_order"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if payload.Total != 3 {
+		t.Fatalf("total = %d, want 3", payload.Total)
+	}
+	if payload.Page != 2 || payload.PageSize != 1 {
+		t.Fatalf("page info = (%d,%d), want (2,1)", payload.Page, payload.PageSize)
+	}
+	if payload.SortBy != "priority" || payload.SortOrder != "desc" {
+		t.Fatalf("sort = (%q,%q), want (%q,%q)", payload.SortBy, payload.SortOrder, "priority", "desc")
+	}
+	if len(payload.Files) != 1 {
+		t.Fatalf("len(files) = %d, want 1", len(payload.Files))
+	}
+	if got := payload.Files[0]["name"]; got != "c.json" {
+		t.Fatalf("files[0].name = %v, want %q", got, "c.json")
+	}
+}
+
+func TestListAuthFiles_RejectsInvalidSortBy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	mgr := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "auth-a",
+		Provider: "codex",
+		FileName: "a.json",
+		Attributes: map[string]string{
+			"runtime_only": "true",
+		},
+	}
+	if _, err := mgr.Register(context.Background(), auth); err != nil {
+		t.Fatalf("register auth: %v", err)
+	}
+
+	h := &Handler{authManager: mgr}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files?sort_by=unknown", nil)
+
+	h.ListAuthFiles(ctx)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("ListAuthFiles status = %d, want %d, body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}

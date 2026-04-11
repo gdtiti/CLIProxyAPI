@@ -248,6 +248,98 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthor
 	}
 }
 
+func TestAuthRuntimeMaintenanceHook_QuotaProbeIgnoresAuthFileProxyOverrideWhenConfigured(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	var usageCalls atomic.Int32
+	usageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usageCalls.Add(1)
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Fatalf("unexpected usage path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
+			t.Fatalf("Authorization = %q, want %q", got, "Bearer test-token")
+		}
+		if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct-1" {
+			t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "acct-1")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rate_limit":{"allowed":true}}`))
+	}))
+	defer usageServer.Close()
+
+	var proxyCalls atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyCalls.Add(1)
+		http.Error(w, "proxy should be ignored", http.StatusBadGateway)
+	}))
+	defer proxyServer.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		SDKConfig: config.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                         true,
+			CodexQuotaCheckRequestInterval: 2,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID("codex-auth.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth to exist after reload")
+	}
+	auth.ProxyURL = proxyServer.URL
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "test-token"
+	auth.Metadata["account_id"] = "acct-1"
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = usageServer.URL + "/backend-api/codex"
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Update() error = %v", err)
+	}
+
+	result := coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	}
+
+	manager.MarkResult(context.Background(), result)
+	manager.MarkResult(context.Background(), result)
+
+	if got := usageCalls.Load(); got != 1 {
+		t.Fatalf("usageCalls = %d, want 1", got)
+	}
+	if got := proxyCalls.Load(); got != 0 {
+		t.Fatalf("proxyCalls = %d, want 0", got)
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain in manager")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to remain enabled after successful quota probe")
+	}
+}
+
 func TestAuthRuntimeMaintenanceHook_RemovesOnlyGeminiVirtualProjectOnUnauthorizedThreshold(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "gemini-auth.json")

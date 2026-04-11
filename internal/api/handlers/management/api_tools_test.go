@@ -1,10 +1,15 @@
 package management
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -243,5 +248,223 @@ func TestAuthByIndexDistinguishesSharedAPIKeysAcrossProviders(t *testing.T) {
 	}
 	if gotCompat.ID != compatAuth.ID {
 		t.Fatalf("authByIndex(compat) returned %q, want %q", gotCompat.ID, compatAuth.ID)
+	}
+}
+
+func TestAPICallHandlerIgnoreFileAuthProxyOverride(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source":"upstream"}`))
+	}))
+	defer upstream.Close()
+
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source":"proxy"}`))
+	}))
+	defer proxy.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex:file:ignore-proxy",
+		Provider: "codex",
+		FileName: "auths/codex.json",
+		ProxyURL: proxy.URL,
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	authIndex := auth.EnsureIndex()
+	body, errMarshal := json.Marshal(apiCallRequest{
+		AuthIndexSnake: &authIndex,
+		Method:         http.MethodGet,
+		URL:            upstream.URL + "/quota",
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{
+				IgnoreAuthFileProxyURL: true,
+			},
+		},
+		authManager: manager,
+	}
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+
+	var response apiCallResponse
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("upstream status_code = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	if response.Body != `{"source":"upstream"}` {
+		t.Fatalf("response body = %q, want %q", response.Body, `{"source":"upstream"}`)
+	}
+	if got := proxyHits.Load(); got != 0 {
+		t.Fatalf("proxy hits = %d, want 0", got)
+	}
+}
+
+func TestAPICallHandlerIgnoreFileAuthProxyWithPathMarker(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"source":"upstream"}`))
+	}))
+	defer upstream.Close()
+
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source":"proxy"}`))
+	}))
+	defer proxy.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex:file-name-missing",
+		Provider: "codex",
+		ProxyURL: proxy.URL,
+		Attributes: map[string]string{
+			"path": "auths/codex.json",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	authIndex := auth.EnsureIndex()
+	body, errMarshal := json.Marshal(apiCallRequest{
+		AuthIndexSnake: &authIndex,
+		Method:         http.MethodGet,
+		URL:            upstream.URL,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{
+				IgnoreAuthFileProxyURL: true,
+			},
+		},
+		authManager: manager,
+	}
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+
+	var response apiCallResponse
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if response.Body != `{"source":"upstream"}` {
+		t.Fatalf("response body = %q, want %q", response.Body, `{"source":"upstream"}`)
+	}
+	if got := proxyHits.Load(); got != 0 {
+		t.Fatalf("proxy hits = %d, want 0", got)
+	}
+}
+
+func TestAPICallHandlerConfigBackedProxyStillUsedWhenIgnoreEnabled(t *testing.T) {
+	t.Parallel()
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"source":"upstream"}`))
+	}))
+	defer upstream.Close()
+
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source":"proxy"}`))
+	}))
+	defer proxy.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	auth := &coreauth.Auth{
+		ID:       "codex:config-backed",
+		Provider: "codex",
+		ProxyURL: proxy.URL,
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	authIndex := auth.EnsureIndex()
+	body, errMarshal := json.Marshal(apiCallRequest{
+		AuthIndexSnake: &authIndex,
+		Method:         http.MethodGet,
+		URL:            upstream.URL,
+	})
+	if errMarshal != nil {
+		t.Fatalf("marshal request: %v", errMarshal)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/api-call", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	h := &Handler{
+		cfg: &config.Config{
+			SDKConfig: sdkconfig.SDKConfig{
+				IgnoreAuthFileProxyURL: true,
+			},
+		},
+		authManager: manager,
+	}
+	h.APICall(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want %d", rec.Code, rec.Body.String(), http.StatusOK)
+	}
+
+	var response apiCallResponse
+	if errUnmarshal := json.Unmarshal(rec.Body.Bytes(), &response); errUnmarshal != nil {
+		t.Fatalf("unmarshal response: %v", errUnmarshal)
+	}
+	if response.Body != `{"source":"proxy"}` {
+		t.Fatalf("response body = %q, want %q", response.Body, `{"source":"proxy"}`)
+	}
+	if got := proxyHits.Load(); got != 1 {
+		t.Fatalf("proxy hits = %d, want 1", got)
 	}
 }

@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -651,6 +653,91 @@ func TestRecoverAuthMaintenanceCandidate_KeepsDisabledWhenQuotaNotRecovered(t *t
 	records := service.authMaintenanceRecoveryRecentSnapshot()
 	if !authMaintenanceRecentContains(records, "probe") || !authMaintenanceRecentContains(records, "keep_disabled") {
 		t.Fatalf("expected probe and keep_disabled events, got %+v", records)
+	}
+}
+
+func TestRecoverAuthMaintenanceCandidate_QuotaProbeIgnoresAuthFileProxyOverrideWhenConfigured(t *testing.T) {
+	service, manager, path, cleanup := newAuthMaintenanceRecoveryTestService(t, map[string]any{
+		"type":         "codex",
+		"email":        "user@example.com",
+		"disabled":     true,
+		"access_token": "live-token",
+		"account_id":   "acct-1",
+		"expired":      time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339Nano),
+		coreauth.AuthMaintenanceAutoRecoveryMetadataKey:           true,
+		coreauth.AuthMaintenanceAutoRecoveryReasonMetadataKey:     "disabled after usage_limit_reached",
+		coreauth.AuthMaintenanceAutoRecoveryDisabledAtMetadataKey: time.Now().Add(-30 * time.Minute).UTC().Format(time.RFC3339Nano),
+	})
+	defer cleanup()
+
+	service.cfg.IgnoreAuthFileProxyURL = true
+
+	var usageCalls atomic.Int32
+	usageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		usageCalls.Add(1)
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Fatalf("unexpected usage path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer live-token" {
+			t.Fatalf("Authorization = %q, want %q", got, "Bearer live-token")
+		}
+		if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct-1" {
+			t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "acct-1")
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"rate_limit":{"allowed":true}}`))
+	}))
+	defer usageServer.Close()
+
+	var proxyCalls atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyCalls.Add(1)
+		http.Error(w, "proxy should be ignored", http.StatusBadGateway)
+	}))
+	defer proxyServer.Close()
+
+	auth, ok := manager.GetByID(filepath.Base(path))
+	if !ok || auth == nil {
+		t.Fatalf("expected auth to exist")
+	}
+	auth.ProxyURL = proxyServer.URL
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = usageServer.URL + "/backend-api/codex"
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Update() error = %v", err)
+	}
+
+	candidate, ok := service.authMaintenanceRecoveryCandidateForAuth(auth, filepath.Dir(path), time.Now())
+	if !ok {
+		t.Fatalf("expected recovery candidate")
+	}
+	if err := service.recoverAuthMaintenanceCandidate(context.Background(), candidate); err != nil {
+		t.Fatalf("recoverAuthMaintenanceCandidate() error = %v", err)
+	}
+
+	if got := usageCalls.Load(); got != 1 {
+		t.Fatalf("usageCalls = %d, want 1", got)
+	}
+	if got := proxyCalls.Load(); got != 0 {
+		t.Fatalf("proxyCalls = %d, want 0", got)
+	}
+
+	updated, ok := manager.GetByID(filepath.Base(path))
+	if !ok || updated == nil {
+		t.Fatalf("expected updated auth")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to be unlocked after successful quota probe")
+	}
+	if coreauth.IsAuthMaintenanceAutoRecoverable(updated) {
+		t.Fatalf("expected auto-recovery marker cleared after unlock")
+	}
+
+	records := service.authMaintenanceRecoveryRecentSnapshot()
+	if !authMaintenanceRecentContains(records, "probe") || !authMaintenanceRecentContains(records, "unlock") {
+		t.Fatalf("expected probe and unlock events, got %+v", records)
 	}
 }
 

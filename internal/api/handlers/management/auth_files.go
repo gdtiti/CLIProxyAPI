@@ -272,12 +272,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			files = append(files, entry)
 		}
 	}
-	sort.Slice(files, func(i, j int) bool {
-		nameI, _ := files[i]["name"].(string)
-		nameJ, _ := files[j]["name"].(string)
-		return strings.ToLower(nameI) < strings.ToLower(nameJ)
-	})
-	c.JSON(200, gin.H{"files": files})
+	h.writeAuthFilesListResponse(c, files)
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -383,7 +378,89 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			files = append(files, fileData)
 		}
 	}
-	c.JSON(200, gin.H{"files": files})
+	h.writeAuthFilesListResponse(c, files)
+}
+
+func (h *Handler) writeAuthFilesListResponse(c *gin.Context, files []gin.H) {
+	sortBy, sortOrder, err := parseListSort(c, "name", "asc", allowedAuthFileSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		diff := compareAuthFileEntries(files[i], files[j], sortBy)
+		if diff == 0 {
+			diff = compareAuthFileEntries(files[i], files[j], "name")
+		}
+		if diff == 0 {
+			diff = compareStringsFold(listValueAsString(files[i], "id"), listValueAsString(files[j], "id"))
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+
+	paged, pageInfo, err := parseListPageInfo(c, files, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"files":      paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+	})
+}
+
+var allowedAuthFileSortFields = map[string]struct{}{
+	"account":      {},
+	"auth_index":   {},
+	"email":        {},
+	"last_refresh": {},
+	"modtime":      {},
+	"name":         {},
+	"priority":     {},
+	"provider":     {},
+	"quota_window": {},
+	"size":         {},
+	"status":       {},
+	"type":         {},
+	"updated_at":   {},
+}
+
+func compareAuthFileEntries(left, right gin.H, sortBy string) int {
+	switch sortBy {
+	case "account":
+		return compareStringsFold(listValueAsString(left, "account"), listValueAsString(right, "account"))
+	case "auth_index":
+		return compareStringsFold(listValueAsString(left, "auth_index"), listValueAsString(right, "auth_index"))
+	case "email":
+		return compareStringsFold(listValueAsString(left, "email"), listValueAsString(right, "email"))
+	case "last_refresh":
+		return compareTimes(listValueAsTime(left, "last_refresh"), listValueAsTime(right, "last_refresh"))
+	case "modtime", "updated_at":
+		return compareTimes(listValueAsTime(left, "updated_at", "modtime"), listValueAsTime(right, "updated_at", "modtime"))
+	case "priority":
+		return compareInts(listValueAsInt(left, "priority"), listValueAsInt(right, "priority"))
+	case "provider", "type":
+		return compareStringsFold(listValueAsString(left, "provider", "type"), listValueAsString(right, "provider", "type"))
+	case "quota_window":
+		return compareStringsFold(listValueAsString(left, "quota_window"), listValueAsString(right, "quota_window"))
+	case "size":
+		return compareInt64s(listValueAsInt64(left, "size"), listValueAsInt64(right, "size"))
+	case "status":
+		return compareStringsFold(listValueAsString(left, "status"), listValueAsString(right, "status"))
+	case "name":
+		fallthrough
+	default:
+		return compareStringsFold(listValueAsString(left, "name"), listValueAsString(right, "name"))
+	}
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
