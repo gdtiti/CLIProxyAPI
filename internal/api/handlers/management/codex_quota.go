@@ -283,10 +283,10 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 		},
 		Guide: codexConfigGuideResponse{
 			ContextWindows: codexContextWindowsGuideResponse{
-				GPT5MaxContextTokens:                400000,
+				GPT5MaxContextTokens:                1050000,
 				GPT41MaxContextTokens:               1047576,
-				GPT5SupportsOfficialOneMillion:      false,
-				OfficialOneMillionRecommendedFamily: "gpt-4.1",
+				GPT5SupportsOfficialOneMillion:      true,
+				OfficialOneMillionRecommendedFamily: "gpt-5.4",
 			},
 			HeaderFields: []codexHeaderFieldHintResponse{
 				{
@@ -608,9 +608,9 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 		},
 		Notes: map[string]any{
 			"custom_params":              "Use payload rules to add Codex-specific request fields or upstream-specific custom fields.",
-			"long_context_behavior":      "payload.override.truncation=auto only allows the Responses API to drop older input items when a request would exceed the model context window. It does not expand GPT-5 to a 1M context window.",
-			"one_million_context":        "OpenAI public docs list GPT-5 with a 400000-token context window. Official 1M context is documented for GPT-4.1 family, not GPT-5.",
-			"one_million_context_config": "If your upstream is not OpenAI and exposes a custom 1m flag, add that custom field through payload rules. This repository does not define an official GPT-5 1m switch.",
+			"long_context_behavior":      "payload.override.truncation=auto only tells the Responses API to trim older input items when a request would exceed the model context window. It does not enable 1M context for models that do not already support it.",
+			"one_million_context":        "OpenAI public docs now list gpt-5.4 with a 1.05M-token context window. Official 1M+ context is a model capability, not a separate payload.override switch.",
+			"one_million_context_config": "For official OpenAI gpt-5.4, do not add a one_million_context flag. Use payload.override only for normal request fields such as reasoning.effort, text.verbosity, truncation, or service_tier. Only add a custom 1m field when a non-OpenAI compatible upstream explicitly documents one.",
 			"recovered_tokens_available": false,
 		},
 	})

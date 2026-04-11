@@ -125,14 +125,14 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	if len(configBody.Payload.Default) != 1 {
 		t.Fatalf("len(configBody.Payload.Default) = %d, want 1 pure codex rule", len(configBody.Payload.Default))
 	}
-	if configBody.Guide.ContextWindows.GPT5MaxContextTokens != 400000 {
-		t.Fatalf("guide.context_windows.gpt5_max_context_tokens = %d, want 400000", configBody.Guide.ContextWindows.GPT5MaxContextTokens)
+	if configBody.Guide.ContextWindows.GPT5MaxContextTokens != 1050000 {
+		t.Fatalf("guide.context_windows.gpt5_max_context_tokens = %d, want 1050000", configBody.Guide.ContextWindows.GPT5MaxContextTokens)
 	}
-	if configBody.Guide.ContextWindows.GPT5SupportsOfficialOneMillion {
-		t.Fatalf("guide.context_windows.gpt5_supports_official_one_million = true, want false")
+	if !configBody.Guide.ContextWindows.GPT5SupportsOfficialOneMillion {
+		t.Fatalf("guide.context_windows.gpt5_supports_official_one_million = false, want true")
 	}
-	if configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily != "gpt-4.1" {
-		t.Fatalf("guide.context_windows.official_one_million_recommended_family = %q, want %q", configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily, "gpt-4.1")
+	if configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily != "gpt-5.4" {
+		t.Fatalf("guide.context_windows.official_one_million_recommended_family = %q, want %q", configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily, "gpt-5.4")
 	}
 	if len(configBody.Guide.FieldHints) == 0 {
 		t.Fatalf("len(configBody.Guide.FieldHints) = 0, want hints")
@@ -166,6 +166,12 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	}
 	if configBody.Notes["one_million_context"] == nil {
 		t.Fatalf("notes.one_million_context missing")
+	}
+	if !strings.Contains(configBody.Notes["one_million_context"].(string), "gpt-5.4") {
+		t.Fatalf("notes.one_million_context = %q, want gpt-5.4 guidance", configBody.Notes["one_million_context"])
+	}
+	if !strings.Contains(configBody.Notes["one_million_context_config"].(string), "do not add a one_million_context flag") {
+		t.Fatalf("notes.one_million_context_config = %q, want no-switch guidance", configBody.Notes["one_million_context_config"])
 	}
 	if configBody.Notes["long_context_behavior"] == nil {
 		t.Fatalf("notes.long_context_behavior missing")
