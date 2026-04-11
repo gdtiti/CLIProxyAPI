@@ -349,8 +349,6 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-	s.engine.GET("/management-codex-auth.html", s.mgmt.ServeCodexAuthPage)
-	s.engine.GET("/management-codex-auth-inject.js", s.mgmt.ServeCodexAuthInjectScript)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -776,24 +774,7 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		return
 	}
 
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(injectManagementControlPanelScript(string(data))))
-}
-
-const managementCodexInjectTag = `<script src="/management-codex-auth-inject.js"></script>`
-
-func injectManagementControlPanelScript(content string) string {
-	if strings.Contains(content, managementCodexInjectTag) {
-		return content
-	}
-
-	lowerContent := strings.ToLower(content)
-	if idx := strings.LastIndex(lowerContent, "</body>"); idx >= 0 {
-		return content[:idx] + managementCodexInjectTag + content[idx:]
-	}
-	if idx := strings.LastIndex(lowerContent, "</head>"); idx >= 0 {
-		return content[:idx] + managementCodexInjectTag + content[idx:]
-	}
-	return content + managementCodexInjectTag
+	c.Data(http.StatusOK, "text/html; charset=utf-8", data)
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
