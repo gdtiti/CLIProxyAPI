@@ -710,6 +710,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/auth-files/recycle-bin", s.mgmt.PurgeAuthRecycleBin)
 
 		mgmt.PATCH("/auth-files/excluded-models/batch", s.mgmt.PatchAuthFilesExcludedModelsBatch)
+		mgmt.PATCH("/auth-files/fields/batch", s.mgmt.PatchAuthFilesFieldsBatch)
 		mgmt.PATCH("/auth-files/proxy-url/batch", s.mgmt.PatchAuthFilesProxyURLBatch)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)

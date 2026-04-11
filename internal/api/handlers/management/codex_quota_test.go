@@ -340,6 +340,50 @@ func TestCodexQuotaHandlers_SupportSortAndPagination(t *testing.T) {
 	if eventBody.Events[0].CreatedAt.After(eventBody.Events[len(eventBody.Events)-1].CreatedAt) {
 		t.Fatalf("events not sorted ascending by created_at")
 	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota?keyword=beta&quota_exceeded=false", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quota filter status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &quotaBody); errDecode != nil {
+		t.Fatalf("quota filter decode error = %v", errDecode)
+	}
+	if len(quotaBody.Accounts) != 1 || quotaBody.Accounts[0].AuthID != beta.ID {
+		t.Fatalf("quota filtered accounts = %v, want only %q", quotaBody.Accounts, beta.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-usage?keyword=alpha", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage filter status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &usageBody); errDecode != nil {
+		t.Fatalf("usage filter decode error = %v", errDecode)
+	}
+	if len(usageBody.Usage) != 1 || usageBody.Usage[0].AuthID != alpha.ID {
+		t.Fatalf("usage filtered entries = %v, want only %q", usageBody.Usage, alpha.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-events?auth_id="+beta.ID+"&event_type=registered&quota_exceeded=false", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events filter status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &eventBody); errDecode != nil {
+		t.Fatalf("events filter decode error = %v", errDecode)
+	}
+	if len(eventBody.Events) != 1 {
+		t.Fatalf("len(filtered events) = %d, want 1", len(eventBody.Events))
+	}
+	for _, event := range eventBody.Events {
+		if event.AuthID != beta.ID || event.EventType != "registered" || event.QuotaExceeded {
+			t.Fatalf("unexpected filtered event = %+v", event)
+		}
+	}
 }
 
 func TestCodexQuotaHandlers_RejectInvalidSortBy(t *testing.T) {
@@ -361,6 +405,13 @@ func TestCodexQuotaHandlers_RejectInvalidSortBy(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("quota status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota?quota_exceeded=maybe", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("quota invalid bool status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
 	}
 }
 

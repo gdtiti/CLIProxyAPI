@@ -115,6 +115,12 @@ func (h *Handler) GetCodexAuthQuota(c *gin.Context) {
 		return
 	}
 	items := service.ListSnapshots()
+	filtered, err := filterCodexSnapshotViews(c, items)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items = filtered
 	sortBy, sortOrder, err := parseListSort(c, "auth_index", "asc", allowedCodexQuotaSortFields)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -187,6 +193,12 @@ func (h *Handler) GetCodexAuthEvents(c *gin.Context) {
 	}
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
 	items := service.ListEvents(authIndex, 0)
+	filtered, err := filterCodexEvents(c, items)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items = filtered
 	sortBy, sortOrder, err := parseListSort(c, "created_at", "desc", allowedCodexEventSortFields)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -231,6 +243,12 @@ func (h *Handler) GetCodexAuthUsage(c *gin.Context) {
 		return
 	}
 	items := service.ListRollups()
+	filtered, err := filterCodexUsageRollups(c, items)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items = filtered
 	sortBy, sortOrder, err := parseListSort(c, "auth_index", "asc", allowedCodexUsageSortFields)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -693,6 +711,68 @@ var allowedCodexEventSortFields = map[string]struct{}{
 	"quota_exceeded": {},
 	"request_count":  {},
 	"total_tokens":   {},
+}
+
+func filterCodexSnapshotViews(c *gin.Context, items []codexquota.SnapshotView) ([]codexquota.SnapshotView, error) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	status := strings.TrimSpace(c.Query("status"))
+	quotaExceeded, err := parseOptionalBool(c.Query("quota_exceeded"))
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]codexquota.SnapshotView, 0, len(items))
+	for _, item := range items {
+		if status != "" && !strings.EqualFold(strings.TrimSpace(item.Status), status) {
+			continue
+		}
+		if quotaExceeded != nil && item.QuotaExceeded != *quotaExceeded {
+			continue
+		}
+		if !matchesAnyFold(keyword, item.AuthID, item.AuthIndex, item.Account, item.FileName, item.Label, item.Status, item.QuotaReason) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func filterCodexUsageRollups(c *gin.Context, items []codexquota.UsageRollup) ([]codexquota.UsageRollup, error) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	filtered := make([]codexquota.UsageRollup, 0, len(items))
+	for _, item := range items {
+		if !matchesAnyFold(keyword, item.AuthID, item.AuthIndex, item.Account) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func filterCodexEvents(c *gin.Context, items []codexquota.Event) ([]codexquota.Event, error) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	authID := strings.TrimSpace(c.Query("auth_id"))
+	eventType := strings.TrimSpace(c.Query("event_type"))
+	quotaExceeded, err := parseOptionalBool(c.Query("quota_exceeded"))
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]codexquota.Event, 0, len(items))
+	for _, item := range items {
+		if authID != "" && !strings.EqualFold(strings.TrimSpace(item.AuthID), authID) {
+			continue
+		}
+		if eventType != "" && !strings.EqualFold(strings.TrimSpace(item.EventType), eventType) {
+			continue
+		}
+		if quotaExceeded != nil && item.QuotaExceeded != *quotaExceeded {
+			continue
+		}
+		if !matchesAnyFold(keyword, item.AuthID, item.AuthIndex, item.EventType, item.Reason, item.StatusMessage, item.LastError, item.QuotaReason) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
 }
 
 func compareCodexSnapshotViews(left, right codexquota.SnapshotView, sortBy string) int {

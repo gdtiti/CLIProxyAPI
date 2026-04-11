@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -157,6 +158,41 @@ func compareTimes(left, right time.Time) int {
 	default:
 		return 0
 	}
+}
+
+func containsFold(value, needle string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	needle = strings.ToLower(strings.TrimSpace(needle))
+	if needle == "" {
+		return true
+	}
+	return strings.Contains(value, needle)
+}
+
+func parseOptionalBool(raw string) (*bool, error) {
+	trimmed := strings.ToLower(strings.TrimSpace(raw))
+	if trimmed == "" {
+		return nil, nil
+	}
+	switch trimmed {
+	case "1", "true", "yes", "y", "on":
+		value := true
+		return &value, nil
+	case "0", "false", "no", "n", "off":
+		value := false
+		return &value, nil
+	default:
+		return nil, fmt.Errorf("invalid bool")
+	}
+}
+
+func matchesAnyFold(query string, candidates ...string) bool {
+	if strings.TrimSpace(query) == "" {
+		return true
+	}
+	return slices.ContainsFunc(candidates, func(candidate string) bool {
+		return containsFold(candidate, query)
+	})
 }
 
 func listValueAsString(entry gin.H, keys ...string) string {
