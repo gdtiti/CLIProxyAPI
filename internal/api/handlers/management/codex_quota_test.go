@@ -136,14 +136,38 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	if len(configBody.Guide.FieldHints) == 0 {
 		t.Fatalf("len(configBody.Guide.FieldHints) = 0, want hints")
 	}
+	if len(configBody.Guide.HeaderFields) < 2 {
+		t.Fatalf("len(configBody.Guide.HeaderFields) = %d, want at least 2", len(configBody.Guide.HeaderFields))
+	}
 	if len(configBody.Guide.RuleTargets) < 5 {
 		t.Fatalf("len(configBody.Guide.RuleTargets) = %d, want at least 5", len(configBody.Guide.RuleTargets))
+	}
+	if len(configBody.Guide.FieldGroups) < 4 {
+		t.Fatalf("len(configBody.Guide.FieldGroups) = %d, want at least 4", len(configBody.Guide.FieldGroups))
+	}
+	if len(configBody.Guide.FilterPaths) < 4 {
+		t.Fatalf("len(configBody.Guide.FilterPaths) = %d, want at least 4", len(configBody.Guide.FilterPaths))
 	}
 	if len(configBody.Guide.Presets) == 0 {
 		t.Fatalf("len(configBody.Guide.Presets) = 0, want presets")
 	}
+	if !containsCodexFieldHint(configBody.Guide.FieldHints, "background") {
+		t.Fatalf("guide.field_hints missing background")
+	}
+	if !containsCodexFieldHint(configBody.Guide.FieldHints, "truncation") {
+		t.Fatalf("guide.field_hints missing truncation")
+	}
+	if !containsCodexFieldHint(configBody.Guide.FieldHints, "service_tier") {
+		t.Fatalf("guide.field_hints missing service_tier")
+	}
+	if !containsCodexPreset(configBody.Guide.Presets, "background_long_tasks") {
+		t.Fatalf("guide.presets missing background_long_tasks")
+	}
 	if configBody.Notes["one_million_context"] == nil {
 		t.Fatalf("notes.one_million_context missing")
+	}
+	if configBody.Notes["long_context_behavior"] == nil {
+		t.Fatalf("notes.long_context_behavior missing")
 	}
 
 	putBody := `{"codex_header_defaults":{"user_agent":"new-agent","beta_features":"beta-b"},"payload":{"default":[{"models":[{"name":"gpt-*","protocol":"codex"}],"params":{"instructions":"new"}}],"default_raw":[],"override":[],"override_raw":[],"filter":[]}}`
@@ -170,4 +194,22 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	if !strings.Contains(string(configBytes), "new-agent") {
 		t.Fatalf("updated config file does not contain new-agent: %s", string(configBytes))
 	}
+}
+
+func containsCodexFieldHint(hints []codexPayloadFieldHintResponse, path string) bool {
+	for _, hint := range hints {
+		if hint.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCodexPreset(presets []codexPayloadPresetResponse, id string) bool {
+	for _, preset := range presets {
+		if preset.ID == id {
+			return true
+		}
+	}
+	return false
 }

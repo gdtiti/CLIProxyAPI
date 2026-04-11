@@ -39,8 +39,11 @@ type codexAuthConfigRequest struct {
 
 type codexConfigGuideResponse struct {
 	ContextWindows codexContextWindowsGuideResponse `json:"context_windows"`
+	HeaderFields   []codexHeaderFieldHintResponse   `json:"header_fields"`
 	RuleTargets    []codexRuleTargetGuideResponse   `json:"rule_targets"`
+	FieldGroups    []codexFieldGroupResponse        `json:"field_groups"`
 	FieldHints     []codexPayloadFieldHintResponse  `json:"field_hints"`
+	FilterPaths    []codexFilterPathHintResponse    `json:"filter_paths"`
 	Presets        []codexPayloadPresetResponse     `json:"presets"`
 	OfficialDocs   map[string]string                `json:"official_docs"`
 }
@@ -63,10 +66,32 @@ type codexPayloadFieldHintResponse struct {
 	Official    bool     `json:"official"`
 }
 
+type codexHeaderFieldHintResponse struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	ValueType   string `json:"value_type"`
+	Description string `json:"description"`
+	Example     any    `json:"example,omitempty"`
+}
+
 type codexRuleTargetGuideResponse struct {
 	ID          string `json:"id"`
 	Title       string `json:"title"`
 	Raw         bool   `json:"raw"`
+	Description string `json:"description"`
+}
+
+type codexFieldGroupResponse struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	RuleTargets []string `json:"rule_targets,omitempty"`
+	Paths       []string `json:"paths"`
+}
+
+type codexFilterPathHintResponse struct {
+	Path        string `json:"path"`
+	Label       string `json:"label"`
 	Description string `json:"description"`
 }
 
@@ -165,6 +190,22 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 				GPT5SupportsOfficialOneMillion:      false,
 				OfficialOneMillionRecommendedFamily: "gpt-4.1",
 			},
+			HeaderFields: []codexHeaderFieldHintResponse{
+				{
+					ID:          "user_agent",
+					Label:       "User-Agent",
+					ValueType:   "string",
+					Description: "Overrides the Codex/OpenAI User-Agent header sent upstream.",
+					Example:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Codex/1.0",
+				},
+				{
+					ID:          "beta_features",
+					Label:       "Beta features",
+					ValueType:   "string",
+					Description: "Comma-separated beta feature header value for Codex/OpenAI upstreams that require it.",
+					Example:     "responses-v1,reasoning_summaries",
+				},
+			},
 			RuleTargets: []codexRuleTargetGuideResponse{
 				{
 					ID:          "default",
@@ -197,6 +238,36 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 					Description: "Remove fields from the outgoing payload by JSON path.",
 				},
 			},
+			FieldGroups: []codexFieldGroupResponse{
+				{
+					ID:          "request_basics",
+					Title:       "Request basics",
+					Description: "Common request controls that are safe to expose as standard form fields.",
+					RuleTargets: []string{"default", "override"},
+					Paths:       []string{"instructions", "max_output_tokens", "store", "background", "truncation", "safety_identifier", "service_tier"},
+				},
+				{
+					ID:          "gpt5_controls",
+					Title:       "GPT-5 controls",
+					Description: "GPT-5 family options documented in the Responses API.",
+					RuleTargets: []string{"default", "override"},
+					Paths:       []string{"reasoning.effort", "reasoning.summary", "text.verbosity"},
+				},
+				{
+					ID:          "structured_output",
+					Title:       "Structured output",
+					Description: "Raw JSON settings that should use a structured editor instead of a plain text box.",
+					RuleTargets: []string{"default_raw", "override_raw"},
+					Paths:       []string{"response_format"},
+				},
+				{
+					ID:          "payload_filter",
+					Title:       "Filter paths",
+					Description: "Common payload paths that can be removed before forwarding the request upstream.",
+					RuleTargets: []string{"filter"},
+					Paths:       []string{"parallel_tool_calls", "response_format", "reasoning.effort", "reasoning.summary", "text.verbosity", "store", "background", "service_tier"},
+				},
+			},
 			FieldHints: []codexPayloadFieldHintResponse{
 				{
 					Path:        "instructions",
@@ -215,6 +286,15 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 					Description: "Controls GPT-5 reasoning depth.",
 					Enum:        []string{"minimal", "low", "medium", "high"},
 					Example:     "high",
+					Official:    true,
+				},
+				{
+					Path:        "reasoning.summary",
+					Label:       "Reasoning summary",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Requests a reasoning summary in the Responses API. Use auto unless your upstream documents a narrower mode.",
+					Example:     "auto",
 					Official:    true,
 				},
 				{
@@ -253,6 +333,85 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 					Description: "Controls whether the upstream stores the response for later retrieval when supported.",
 					Example:     false,
 					Official:    true,
+				},
+				{
+					Path:        "background",
+					Label:       "Background mode",
+					ValueType:   "boolean",
+					RuleTargets: []string{"default", "override"},
+					Description: "Runs the request asynchronously through the Responses API background mode. Background mode requires store=true.",
+					Example:     true,
+					Official:    true,
+				},
+				{
+					Path:        "truncation",
+					Label:       "Truncation strategy",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Controls what the Responses API does when the input would exceed the model context window.",
+					Enum:        []string{"disabled", "auto"},
+					Example:     "auto",
+					Official:    true,
+				},
+				{
+					Path:        "safety_identifier",
+					Label:       "Safety identifier",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Stable end-user identifier for OpenAI safety systems. Hash your user identifier before sending it upstream.",
+					Example:     "user_123456",
+					Official:    true,
+				},
+				{
+					Path:        "service_tier",
+					Label:       "Service tier",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Request-level processing tier for supported OpenAI endpoints. Use priority only when the upstream project is enabled for it.",
+					Example:     "priority",
+					Official:    true,
+				},
+			},
+			FilterPaths: []codexFilterPathHintResponse{
+				{
+					Path:        "parallel_tool_calls",
+					Label:       "parallel_tool_calls",
+					Description: "Remove this when the upstream does not support parallel tool calls.",
+				},
+				{
+					Path:        "response_format",
+					Label:       "response_format",
+					Description: "Remove structured output settings for upstreams that only accept plain text.",
+				},
+				{
+					Path:        "reasoning.effort",
+					Label:       "reasoning.effort",
+					Description: "Remove this when the target model ignores or rejects reasoning controls.",
+				},
+				{
+					Path:        "reasoning.summary",
+					Label:       "reasoning.summary",
+					Description: "Remove this when the upstream does not expose reasoning summaries.",
+				},
+				{
+					Path:        "text.verbosity",
+					Label:       "text.verbosity",
+					Description: "Remove this when the upstream does not support GPT-5 verbosity controls.",
+				},
+				{
+					Path:        "store",
+					Label:       "store",
+					Description: "Remove this when an upstream enforces its own storage policy.",
+				},
+				{
+					Path:        "background",
+					Label:       "background",
+					Description: "Remove this when the upstream does not support background responses.",
+				},
+				{
+					Path:        "service_tier",
+					Label:       "service_tier",
+					Description: "Remove this when the upstream ignores or rejects priority processing fields.",
 				},
 			},
 			Presets: []codexPayloadPresetResponse{
@@ -308,15 +467,50 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 					Models:      []config.PayloadModelRule{{Name: "*", Protocol: "codex"}},
 					Paths:       []string{"parallel_tool_calls"},
 				},
+				{
+					ID:          "background_long_tasks",
+					Title:       "Background long tasks",
+					Description: "Use payload.override to enable background mode together with store=true for long-running GPT-5 style requests.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"background": true, "store": true},
+				},
+				{
+					ID:          "priority_processing",
+					Title:       "Priority processing",
+					Description: "Use payload.override to request service_tier=priority on supported OpenAI upstreams.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+					Params:      map[string]any{"service_tier": "priority"},
+				},
+				{
+					ID:          "reasoning_summary_auto",
+					Title:       "Reasoning summary auto",
+					Description: "Use payload.override to request reasoning summaries when the upstream supports them.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"reasoning.summary": "auto"},
+				},
 			},
 			OfficialDocs: map[string]string{
+				"background":      "https://platform.openai.com/docs/guides/background",
 				"models":          "https://platform.openai.com/docs/models",
+				"priority":        "https://platform.openai.com/docs/guides/priority-processing",
 				"reasoning":       "https://platform.openai.com/docs/guides/reasoning",
+				"safety":          "https://platform.openai.com/docs/guides/safety-checks",
 				"text_generation": "https://platform.openai.com/docs/guides/text?api-mode=responses",
+				"responses_api":   "https://platform.openai.com/docs/api-reference/responses",
 			},
 		},
 		Notes: map[string]any{
 			"custom_params":              "Use payload rules to add Codex-specific request fields or upstream-specific custom fields.",
+			"long_context_behavior":      "payload.override.truncation=auto only allows the Responses API to drop older input items when a request would exceed the model context window. It does not expand GPT-5 to a 1M context window.",
 			"one_million_context":        "OpenAI public docs list GPT-5 with a 400000-token context window. Official 1M context is documented for GPT-4.1 family, not GPT-5.",
 			"one_million_context_config": "If your upstream is not OpenAI and exposes a custom 1m flag, add that custom field through payload rules. This repository does not define an official GPT-5 1m switch.",
 			"recovered_tokens_available": false,
