@@ -39,6 +39,7 @@ type codexAuthConfigRequest struct {
 
 type codexConfigGuideResponse struct {
 	ContextWindows codexContextWindowsGuideResponse `json:"context_windows"`
+	RuleTargets    []codexRuleTargetGuideResponse   `json:"rule_targets"`
 	FieldHints     []codexPayloadFieldHintResponse  `json:"field_hints"`
 	Presets        []codexPayloadPresetResponse     `json:"presets"`
 	OfficialDocs   map[string]string                `json:"official_docs"`
@@ -62,6 +63,13 @@ type codexPayloadFieldHintResponse struct {
 	Official    bool     `json:"official"`
 }
 
+type codexRuleTargetGuideResponse struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Raw         bool   `json:"raw"`
+	Description string `json:"description"`
+}
+
 type codexPayloadPresetResponse struct {
 	ID          string                    `json:"id"`
 	Title       string                    `json:"title"`
@@ -70,7 +78,8 @@ type codexPayloadPresetResponse struct {
 	Raw         bool                      `json:"raw"`
 	Official    bool                      `json:"official"`
 	Models      []config.PayloadModelRule `json:"models"`
-	Params      map[string]any            `json:"params"`
+	Params      map[string]any            `json:"params,omitempty"`
+	Paths       []string                  `json:"paths,omitempty"`
 }
 
 func (h *Handler) GetCodexAuthQuota(c *gin.Context) {
@@ -156,6 +165,38 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 				GPT5SupportsOfficialOneMillion:      false,
 				OfficialOneMillionRecommendedFamily: "gpt-4.1",
 			},
+			RuleTargets: []codexRuleTargetGuideResponse{
+				{
+					ID:          "default",
+					Title:       "payload.default",
+					Raw:         false,
+					Description: "Set a field only when the incoming payload does not already contain it.",
+				},
+				{
+					ID:          "default_raw",
+					Title:       "payload.default_raw",
+					Raw:         true,
+					Description: "Set a missing field using a raw JSON fragment string.",
+				},
+				{
+					ID:          "override",
+					Title:       "payload.override",
+					Raw:         false,
+					Description: "Always overwrite the target field with the configured value.",
+				},
+				{
+					ID:          "override_raw",
+					Title:       "payload.override_raw",
+					Raw:         true,
+					Description: "Always overwrite the target field using a raw JSON fragment string.",
+				},
+				{
+					ID:          "filter",
+					Title:       "payload.filter",
+					Raw:         false,
+					Description: "Remove fields from the outgoing payload by JSON path.",
+				},
+			},
 			FieldHints: []codexPayloadFieldHintResponse{
 				{
 					Path:        "instructions",
@@ -195,6 +236,24 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 					Example:     32768,
 					Official:    true,
 				},
+				{
+					Path:        "response_format",
+					Label:       "Response format",
+					ValueType:   "raw_json",
+					RuleTargets: []string{"default_raw", "override_raw"},
+					Description: "Sets a raw JSON response format object. Use only when your upstream expects the Responses API response_format structure.",
+					Example:     "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}",
+					Official:    true,
+				},
+				{
+					Path:        "store",
+					Label:       "Store response",
+					ValueType:   "boolean",
+					RuleTargets: []string{"default", "override"},
+					Description: "Controls whether the upstream stores the response for later retrieval when supported.",
+					Example:     false,
+					Official:    true,
+				},
 			},
 			Presets: []codexPayloadPresetResponse{
 				{
@@ -226,6 +285,28 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 					Official:    true,
 					Models:      []config.PayloadModelRule{{Name: "*", Protocol: "codex"}},
 					Params:      map[string]any{"instructions": "Keep answers concise."},
+				},
+				{
+					ID:          "responses_json_schema",
+					Title:       "Responses JSON schema",
+					Description: "Use payload.override_raw to force a response_format JSON schema object.",
+					RuleTarget:  "override_raw",
+					Raw:         true,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+					Params: map[string]any{
+						"response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"string\"}},\"required\":[\"result\"]}}}",
+					},
+				},
+				{
+					ID:          "drop_parallel_tool_calls",
+					Title:       "Remove parallel_tool_calls",
+					Description: "Use payload.filter to strip a field before the request reaches an upstream that does not support it.",
+					RuleTarget:  "filter",
+					Raw:         false,
+					Official:    false,
+					Models:      []config.PayloadModelRule{{Name: "*", Protocol: "codex"}},
+					Paths:       []string{"parallel_tool_calls"},
 				},
 			},
 			OfficialDocs: map[string]string{

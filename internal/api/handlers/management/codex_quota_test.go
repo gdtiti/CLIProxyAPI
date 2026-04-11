@@ -136,6 +136,9 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	if len(configBody.Guide.FieldHints) == 0 {
 		t.Fatalf("len(configBody.Guide.FieldHints) = 0, want hints")
 	}
+	if len(configBody.Guide.RuleTargets) < 5 {
+		t.Fatalf("len(configBody.Guide.RuleTargets) = %d, want at least 5", len(configBody.Guide.RuleTargets))
+	}
 	if len(configBody.Guide.Presets) == 0 {
 		t.Fatalf("len(configBody.Guide.Presets) = 0, want presets")
 	}
