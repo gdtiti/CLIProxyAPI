@@ -1613,6 +1613,37 @@ type patchAuthFilesExcludedModelsBatchResponse struct {
 	Results   []patchAuthFilesExcludedModelsBatchResult `json:"results"`
 }
 
+type patchAuthFilesProxyURLBatchRequest struct {
+	Names       []string `json:"names"`
+	ProxyURL    *string  `json:"proxy_url"`
+	DryRun      bool     `json:"dry_run"`
+	StopOnError bool     `json:"stop_on_error"`
+}
+
+type patchAuthFilesProxyURLBatchSummary struct {
+	Total     int `json:"total"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+}
+
+type patchAuthFilesProxyURLBatchResult struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Changed bool   `json:"changed"`
+	Before  string `json:"before"`
+	After   string `json:"after"`
+	Error   string `json:"error,omitempty"`
+}
+
+type patchAuthFilesProxyURLBatchResponse struct {
+	Status  string                              `json:"status"`
+	DryRun  bool                                `json:"dry_run"`
+	Summary patchAuthFilesProxyURLBatchSummary  `json:"summary"`
+	Results []patchAuthFilesProxyURLBatchResult `json:"results"`
+}
+
 // PatchAuthFilesExcludedModelsBatch batch-updates excluded_models in selected auth JSON files.
 // PATCH /v0/management/auth-files/excluded-models/batch
 func (h *Handler) PatchAuthFilesExcludedModelsBatch(c *gin.Context) {
@@ -1771,6 +1802,150 @@ func (h *Handler) applyExcludedModelsPatchToAuthFile(ctx context.Context, name, 
 	return before, after, changed, nil
 }
 
+// PatchAuthFilesProxyURLBatch batch-updates proxy_url in selected auth JSON files.
+// PATCH /v0/management/auth-files/proxy-url/batch
+func (h *Handler) PatchAuthFilesProxyURLBatch(c *gin.Context) {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth directory is not configured"})
+		return
+	}
+
+	var req patchAuthFilesProxyURLBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	names := normalizeBatchAuthFileNames(req.Names)
+	if len(names) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "names is required"})
+		return
+	}
+	if len(names) > maxBatchAuthFileUpdates {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many names, max is %d", maxBatchAuthFileUpdates)})
+		return
+	}
+	if req.ProxyURL == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "proxy_url is required"})
+		return
+	}
+
+	targetProxyURL := strings.TrimSpace(*req.ProxyURL)
+	resp := patchAuthFilesProxyURLBatchResponse{
+		DryRun: req.DryRun,
+		Summary: patchAuthFilesProxyURLBatchSummary{
+			Total: len(names),
+		},
+		Results: make([]patchAuthFilesProxyURLBatchResult, 0, len(names)),
+	}
+
+	ctx := c.Request.Context()
+	stopped := false
+	for _, name := range names {
+		result := patchAuthFilesProxyURLBatchResult{Name: name}
+		if stopped {
+			result.Status = "skipped"
+			resp.Summary.Skipped++
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		before, after, changed, err := h.applyProxyURLPatchToAuthFile(ctx, name, targetProxyURL, req.DryRun)
+		result.Before = before
+		result.After = after
+		result.Changed = changed
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			resp.Summary.Failed++
+			if req.StopOnError {
+				stopped = true
+			}
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		if changed {
+			if req.DryRun {
+				result.Status = "would_update"
+			} else {
+				result.Status = "updated"
+			}
+			resp.Summary.Updated++
+		} else {
+			result.Status = "unchanged"
+			resp.Summary.Unchanged++
+		}
+		resp.Results = append(resp.Results, result)
+	}
+
+	if req.DryRun {
+		resp.Status = "dry_run"
+	} else if resp.Summary.Failed > 0 {
+		resp.Status = "partial"
+	} else {
+		resp.Status = "ok"
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) applyProxyURLPatchToAuthFile(ctx context.Context, name, proxyURL string, dryRun bool) (string, string, bool, error) {
+	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
+		return "", "", false, fmt.Errorf("auth directory is not configured")
+	}
+	if err := validateAuthFileName(name); err != nil {
+		return "", "", false, err
+	}
+
+	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
+	if !filepath.IsAbs(full) {
+		if abs, errAbs := filepath.Abs(full); errAbs == nil {
+			full = abs
+		}
+	}
+
+	data, errRead := os.ReadFile(full)
+	if errRead != nil {
+		if os.IsNotExist(errRead) {
+			return "", "", false, fmt.Errorf("file not found")
+		}
+		return "", "", false, fmt.Errorf("failed to read file: %w", errRead)
+	}
+
+	metadata := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
+		return "", "", false, fmt.Errorf("invalid auth file format: %w", errUnmarshal)
+	}
+
+	before := strings.TrimSpace(readStringFromMetadata(metadata, "proxy_url", "proxy-url"))
+	after := strings.TrimSpace(proxyURL)
+	changed := before != after
+	if !changed || dryRun {
+		return before, after, changed, nil
+	}
+
+	if after == "" {
+		delete(metadata, "proxy_url")
+		delete(metadata, "proxy-url")
+	} else {
+		metadata["proxy_url"] = after
+		delete(metadata, "proxy-url")
+	}
+
+	newData, errMarshal := json.MarshalIndent(metadata, "", "  ")
+	if errMarshal != nil {
+		return before, after, changed, fmt.Errorf("failed to serialize file: %w", errMarshal)
+	}
+	if errWrite := os.WriteFile(full, newData, 0o600); errWrite != nil {
+		return before, after, changed, fmt.Errorf("failed to write file: %w", errWrite)
+	}
+	if errReload := h.reloadAuthFile(ctx, full, newData); errReload != nil {
+		return before, after, changed, fmt.Errorf("failed to reload auth file: %w", errReload)
+	}
+	return before, after, changed, nil
+}
+
 func normalizeBatchAuthFileNames(names []string) []string {
 	if len(names) == 0 {
 		return nil
@@ -1790,6 +1965,22 @@ func normalizeBatchAuthFileNames(names []string) []string {
 		out = append(out, name)
 	}
 	return out
+}
+
+func readStringFromMetadata(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if metadata == nil {
+			return ""
+		}
+		value, ok := metadata[key]
+		if !ok {
+			continue
+		}
+		if text, ok := value.(string); ok {
+			return text
+		}
+	}
+	return ""
 }
 
 func validateAuthFileName(name string) error {

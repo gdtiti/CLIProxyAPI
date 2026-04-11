@@ -3,6 +3,7 @@ package helps
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
@@ -80,5 +81,47 @@ func TestResolveProxyURLFallsBackToGlobalWhenFileProxyIgnored(t *testing.T) {
 
 	if got := ResolveProxyURL(cfg, auth); got != "http://global-proxy.example.com:8080" {
 		t.Fatalf("ResolveProxyURL() = %q, want %q", got, "http://global-proxy.example.com:8080")
+	}
+}
+
+func TestNewProxyAwareHTTPClientIgnoreFileProxySkipsContextRoundTripper(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: sdkconfig.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		FileName: "auths/codex.json",
+		ProxyURL: "http://file-proxy.example.com:8080",
+	}
+
+	contextTransport := &http.Transport{
+		Proxy: func(*http.Request) (*url.URL, error) {
+			return url.Parse("http://context-proxy.example.com:8080")
+		},
+	}
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", http.RoundTripper(contextTransport))
+
+	client := NewProxyAwareHTTPClient(ctx, cfg, auth, 0)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.Proxy == nil {
+		return
+	}
+
+	req, errRequest := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest returned error: %v", errRequest)
+	}
+	proxyURL, errProxy := transport.Proxy(req)
+	if errProxy != nil {
+		t.Fatalf("transport.Proxy returned error: %v", errProxy)
+	}
+	if proxyURL != nil {
+		t.Fatalf("proxy URL = %v, want nil", proxyURL)
 	}
 }

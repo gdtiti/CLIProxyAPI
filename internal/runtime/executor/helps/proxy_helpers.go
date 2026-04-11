@@ -41,10 +41,14 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 	return strings.TrimSpace(cfg.ProxyURL)
 }
 
+func authFileProxyIgnored(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	return cfg != nil && cfg.IgnoreAuthFileProxyURL && auth != nil && strings.TrimSpace(auth.FileName) != ""
+}
+
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
 // 1. Use auth.ProxyURL if configured (highest priority)
 // 2. Use cfg.ProxyURL if auth proxy is not configured
-// 3. Use RoundTripper from context if neither are configured
+// 3. Use RoundTripper from context if neither are configured and auth-file proxy ignore is not active
 //
 // This function caches HTTP clients by proxy URL to enable TCP/TLS connection reuse.
 //
@@ -58,6 +62,7 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	proxyURL := ResolveProxyURL(cfg, auth)
+	ignoredAuthFileProxy := authFileProxyIgnored(cfg, auth)
 
 	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
 	if proxyURL != "" {
@@ -91,6 +96,20 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
 		log.Debugf("failed to setup proxy from URL: %s, falling back to context transport", proxyURL)
+	}
+
+	// When file-backed auth proxy overrides are ignored, never fall back to the context
+	// round tripper because it may still have been constructed from auth.ProxyURL.
+	if ignoredAuthFileProxy {
+		transport, ok := http.DefaultTransport.(*http.Transport)
+		if !ok || transport == nil {
+			httpClient.Transport = &http.Transport{Proxy: nil}
+			return httpClient
+		}
+		clone := transport.Clone()
+		clone.Proxy = nil
+		httpClient.Transport = clone
+		return httpClient
 	}
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
