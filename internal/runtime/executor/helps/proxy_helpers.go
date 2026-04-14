@@ -42,7 +42,8 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 }
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
-// 1. Use auth.ProxyURL if configured (highest priority)
+// 1. Use auth.ProxyURL if configured (highest priority), unless ignore-auth-file-proxy-url
+//    is enabled for a file-backed auth record
 // 2. Use cfg.ProxyURL if auth proxy is not configured
 // 3. Use RoundTripper from context if neither are configured
 //
@@ -57,7 +58,13 @@ func ResolveProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	proxyURL := ResolveProxyURL(cfg, auth)
+	// Priority 1: Use auth.ProxyURL if configured.
+	proxyURL := authProxyURL(cfg, auth)
+
+	// Priority 2: Use cfg.ProxyURL if auth proxy is not configured
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
 
 	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
 	if proxyURL != "" {
@@ -99,6 +106,27 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	return httpClient
+}
+
+// ShouldIgnoreAuthFileProxyURL reports whether the auth-specific proxy_url should be ignored.
+func ShouldIgnoreAuthFileProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	if cfg == nil || !cfg.IgnoreAuthFileProxyURL || auth == nil {
+		return false
+	}
+	if strings.TrimSpace(auth.FileName) != "" {
+		return true
+	}
+	if auth.Attributes == nil {
+		return false
+	}
+	return strings.TrimSpace(auth.Attributes["path"]) != ""
+}
+
+func authProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) string {
+	if auth == nil || ShouldIgnoreAuthFileProxyURL(cfg, auth) {
+		return ""
+	}
+	return strings.TrimSpace(auth.ProxyURL)
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

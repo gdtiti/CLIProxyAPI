@@ -32,9 +32,9 @@ import (
 )
 
 const (
-	codexUserAgent  = "codex-tui/0.118.0 (Mac OS 26.3.1; arm64) iTerm.app/3.6.9 (codex-tui; 0.118.0)"
-	codexVersion    = "0.118.0"
-	codexOriginator = "codex-tui"
+	codexUserAgent  = "codex_cli_rs/0.116.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	codexVersion    = "0.116.0"
+	codexOriginator = "codex_cli_rs"
 )
 
 var dataTag = []byte("data:")
@@ -158,15 +158,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		codexErr := newCodexStatusErr(httpResp.StatusCode, b)
-		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, codexErr.code, b, time.Now())
-		if retryAfter != nil {
-			codexErr.retryAfter = retryAfter
-		}
-		codexErr.cooldownWindow = quotaWindow
-		err = codexErr
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, httpResp.StatusCode, b, time.Now())
+		err = statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: retryAfter, cooldownWindow: quotaWindow}
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -310,15 +305,10 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
-		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
-		codexErr := newCodexStatusErr(httpResp.StatusCode, b)
-		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, codexErr.code, b, time.Now())
-		if retryAfter != nil {
-			codexErr.retryAfter = retryAfter
-		}
-		codexErr.cooldownWindow = quotaWindow
-		err = codexErr
+		appendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, httpResp.StatusCode, b, time.Now())
+		err = statusErr{code: httpResp.StatusCode, msg: string(b), retryAfter: retryAfter, cooldownWindow: quotaWindow}
 		return resp, err
 	}
 	data, err := io.ReadAll(httpResp.Body)
@@ -413,15 +403,10 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			helps.RecordAPIResponseError(ctx, e.cfg, readErr)
 			return nil, readErr
 		}
-		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
-		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
-		codexErr := newCodexStatusErr(httpResp.StatusCode, data)
-		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, codexErr.code, data, time.Now())
-		if retryAfter != nil {
-			codexErr.retryAfter = retryAfter
-		}
-		codexErr.cooldownWindow = quotaWindow
-		err = codexErr
+		appendAPIResponseChunk(ctx, e.cfg, data)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d, error message: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		retryAfter, quotaWindow := e.resolveCodexUsageLimitRetryAfter(ctx, auth, apiKey, baseURL, httpResp.StatusCode, data, time.Now())
+		err = statusErr{code: httpResp.StatusCode, msg: string(data), retryAfter: retryAfter, cooldownWindow: quotaWindow}
 		return nil, err
 	}
 	out := make(chan cliproxyexecutor.StreamChunk)
@@ -721,11 +706,11 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 	}
 
 	profile := buildCodexSignatureProfile(cfg, auth)
-	cfgUserAgent, _ := codexHeaderDefaults(cfg, auth)
+	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	if profile.Strict() && profile.BetaFeatures != "" {
 		r.Header.Set("X-Codex-Beta-Features", profile.BetaFeatures)
 	} else {
-		ensureHeaderWithPriority(r.Header, ginHeaders, "X-Codex-Beta-Features", "", "")
+		ensureHeaderWithPriority(r.Header, ginHeaders, "X-Codex-Beta-Features", cfgBetaFeatures, "")
 	}
 	if profile.Strict() && profile.Version != "" {
 		r.Header.Set("Version", profile.Version)

@@ -5,8 +5,28 @@ import (
 	"testing"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
+
+func TestNewKiroHTTPClientWithPoolingIgnoreAuthFileProxyURLFallsBackToPooledClient(t *testing.T) {
+	t.Parallel()
+
+	cfg := &config.Config{
+		SDKConfig: config.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+	}
+	auth := &cliproxyauth.Auth{
+		FileName: "auths/codex.json",
+		ProxyURL: "http://127.0.0.1:8888",
+	}
+
+	client := newKiroHTTPClientWithPooling(t.Context(), cfg, auth, 0)
+	if client != getKiroPooledHTTPClient() {
+		t.Fatal("expected pooled client when auth proxy is ignored and no global proxy is configured")
+	}
+}
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
 	tests := []struct {
@@ -281,8 +301,8 @@ func TestGetAuthValue(t *testing.T) {
 			expected: "attribute_value",
 		},
 		{
-			name: "Both nil",
-			auth: &cliproxyauth.Auth{},
+			name:     "Both nil",
+			auth:     &cliproxyauth.Auth{},
 			key:      "test_key",
 			expected: "",
 		},
@@ -326,9 +346,9 @@ func TestGetAuthValue(t *testing.T) {
 
 func TestGetAccountKey(t *testing.T) {
 	tests := []struct {
-		name     string
-		auth     *cliproxyauth.Auth
-		checkFn  func(t *testing.T, result string)
+		name    string
+		auth    *cliproxyauth.Auth
+		checkFn func(t *testing.T, result string)
 	}{
 		{
 			name: "From client_id",

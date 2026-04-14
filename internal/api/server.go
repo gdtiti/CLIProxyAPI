@@ -349,8 +349,6 @@ func (s *Server) setupRoutes() {
 	})
 
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
-	s.engine.GET("/management-codex-auth.html", s.mgmt.ServeCodexAuthPage)
-	s.engine.GET("/management-codex-auth-inject.js", s.mgmt.ServeCodexAuthInjectScript)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
 	geminiCLIHandlers := gemini.NewGeminiCLIAPIHandler(s.handlers)
@@ -700,6 +698,13 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.DELETE("/oauth-model-alias", s.mgmt.DeleteOAuthModelAlias)
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
+		mgmt.GET("/codex-auth-refresh-history", s.mgmt.ListCodexAuthRefreshHistory)
+		mgmt.GET("/codex-auth-quota", s.mgmt.GetCodexAuthQuota)
+		mgmt.GET("/codex-auth-quota/:auth_index", s.mgmt.GetCodexAuthQuotaByIndex)
+		mgmt.GET("/codex-auth-events", s.mgmt.GetCodexAuthEvents)
+		mgmt.GET("/codex-auth-usage", s.mgmt.GetCodexAuthUsage)
+		mgmt.GET("/codex-auth-config", s.mgmt.GetCodexAuthConfig)
+		mgmt.PUT("/codex-auth-config", s.mgmt.PutCodexAuthConfig)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
@@ -713,6 +718,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.PATCH("/auth-files/excluded-models/batch", s.mgmt.PatchAuthFilesExcludedModelsBatch)
 		mgmt.PATCH("/auth-files/status", s.mgmt.PatchAuthFileStatus)
+		mgmt.PATCH("/auth-files/fields/batch", s.mgmt.PatchAuthFilesFieldsBatch)
 		mgmt.PATCH("/auth-files/fields", s.mgmt.PatchAuthFileFields)
 		mgmt.POST("/vertex/import", s.mgmt.ImportVertexCredential)
 

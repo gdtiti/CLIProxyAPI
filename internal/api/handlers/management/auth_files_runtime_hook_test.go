@@ -248,6 +248,81 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthor
 	}
 }
 
+func TestAuthRuntimeMaintenanceHook_CodexQuotaProbeIgnoresAuthFileProxyURLWhenConfigured(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	data := []byte(`{"type":"codex","email":"user@example.com"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	var probeCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probeCalls.Add(1)
+		if r.URL.Path != "/backend-api/wham/usage" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		SDKConfig: config.SDKConfig{
+			IgnoreAuthFileProxyURL: true,
+		},
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                         true,
+			CodexQuotaCheckRequestInterval: 2,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID("codex-auth.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth to exist after reload")
+	}
+	auth.ProxyURL = "http://127.0.0.1:1"
+	if auth.Metadata == nil {
+		auth.Metadata = make(map[string]any)
+	}
+	auth.Metadata["access_token"] = "test-token"
+	auth.Metadata["account_id"] = "acct-1"
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = server.URL + "/backend-api/codex"
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Update() error = %v", err)
+	}
+
+	result := coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	}
+
+	manager.MarkResult(context.Background(), result)
+	manager.MarkResult(context.Background(), result)
+
+	if got := probeCalls.Load(); got != 1 {
+		t.Fatalf("probeCalls after second request = %d, want 1", got)
+	}
+
+	updated, ok := manager.GetByID("codex-auth.json")
+	if !ok || updated == nil {
+		t.Fatalf("expected auth to remain addressable in manager")
+	}
+	if updated.Disabled {
+		t.Fatalf("expected auth to remain enabled after successful quota probe")
+	}
+}
+
 func TestAuthRuntimeMaintenanceHook_RemovesOnlyGeminiVirtualProjectOnUnauthorizedThreshold(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "gemini-auth.json")

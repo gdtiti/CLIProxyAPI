@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexquota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 type codexPayloadConfigResponse struct {
@@ -28,6 +30,7 @@ type codexHeaderDefaultsResponse struct {
 type codexAuthConfigResponse struct {
 	CodexHeaderDefaults codexHeaderDefaultsResponse `json:"codex_header_defaults"`
 	Payload             codexPayloadConfigResponse  `json:"payload"`
+	Guide               codexConfigGuideResponse    `json:"guide"`
 	Notes               map[string]any              `json:"notes"`
 }
 
@@ -36,13 +39,120 @@ type codexAuthConfigRequest struct {
 	Payload             codexPayloadConfigResponse  `json:"payload"`
 }
 
+type codexConfigGuideResponse struct {
+	ContextWindows codexContextWindowsGuideResponse `json:"context_windows"`
+	HeaderFields   []codexHeaderFieldHintResponse   `json:"header_fields"`
+	RuleTargets    []codexRuleTargetGuideResponse   `json:"rule_targets"`
+	FieldGroups    []codexFieldGroupResponse        `json:"field_groups"`
+	FieldHints     []codexPayloadFieldHintResponse  `json:"field_hints"`
+	FilterPaths    []codexFilterPathHintResponse    `json:"filter_paths"`
+	Presets        []codexPayloadPresetResponse     `json:"presets"`
+	OfficialDocs   map[string]string                `json:"official_docs"`
+}
+
+type codexContextWindowsGuideResponse struct {
+	GPT5MaxContextTokens                int    `json:"gpt5_max_context_tokens"`
+	GPT41MaxContextTokens               int    `json:"gpt41_max_context_tokens"`
+	GPT5SupportsOfficialOneMillion      bool   `json:"gpt5_supports_official_one_million"`
+	OfficialOneMillionRecommendedFamily string `json:"official_one_million_recommended_family"`
+}
+
+type codexPayloadFieldHintResponse struct {
+	Path        string   `json:"path"`
+	Label       string   `json:"label"`
+	ValueType   string   `json:"value_type"`
+	RuleTargets []string `json:"rule_targets"`
+	Description string   `json:"description"`
+	Enum        []string `json:"enum,omitempty"`
+	Example     any      `json:"example,omitempty"`
+	Official    bool     `json:"official"`
+}
+
+type codexHeaderFieldHintResponse struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	ValueType   string `json:"value_type"`
+	Description string `json:"description"`
+	Example     any    `json:"example,omitempty"`
+}
+
+type codexRuleTargetGuideResponse struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Raw         bool   `json:"raw"`
+	Description string `json:"description"`
+}
+
+type codexFieldGroupResponse struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	RuleTargets []string `json:"rule_targets,omitempty"`
+	Paths       []string `json:"paths"`
+}
+
+type codexFilterPathHintResponse struct {
+	Path        string `json:"path"`
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type codexPayloadPresetResponse struct {
+	ID          string                    `json:"id"`
+	Title       string                    `json:"title"`
+	Description string                    `json:"description"`
+	RuleTarget  string                    `json:"rule_target"`
+	Raw         bool                      `json:"raw"`
+	Official    bool                      `json:"official"`
+	Models      []config.PayloadModelRule `json:"models"`
+	Params      map[string]any            `json:"params,omitempty"`
+	Paths       []string                  `json:"paths,omitempty"`
+}
+
 func (h *Handler) GetCodexAuthQuota(c *gin.Context) {
 	service := codexquota.DefaultService()
 	if service == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex quota service unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accounts": service.ListSnapshots()})
+	items := h.filterCurrentCodexSnapshotViews(service.ListSnapshots())
+	filtered, err := filterCodexSnapshotViews(c, items)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items = filtered
+	sortBy, sortOrder, err := parseListSort(c, "auth_index", "asc", allowedCodexQuotaSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		diff := compareCodexSnapshotViews(items[i], items[j], sortBy)
+		if diff == 0 {
+			diff = compareCodexSnapshotViews(items[i], items[j], "auth_index")
+		}
+		if diff == 0 {
+			diff = compareStringsFold(items[i].AuthID, items[j].AuthID)
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+	paged, pageInfo, err := parseListPageInfo(c, items, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"accounts":   paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+	})
 }
 
 func (h *Handler) GetCodexAuthQuotaByIndex(c *gin.Context) {
@@ -56,14 +166,22 @@ func (h *Handler) GetCodexAuthQuotaByIndex(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing auth_index"})
 		return
 	}
+	if !h.currentCodexAuthExists("", authIndex) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found"})
+		return
+	}
 	snapshot, ok := service.GetSnapshot(authIndex)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found"})
 		return
 	}
+	if !h.currentCodexAuthExists(snapshot.AuthID, snapshot.AuthIndex) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"snapshot": snapshot,
-		"events":   service.ListEvents(authIndex, 50),
+		"events":   h.filterCurrentCodexEvents(service.ListEvents(authIndex, 50)),
 	})
 }
 
@@ -83,7 +201,48 @@ func (h *Handler) GetCodexAuthEvents(c *gin.Context) {
 		limit = value
 	}
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
-	c.JSON(http.StatusOK, gin.H{"events": service.ListEvents(authIndex, limit)})
+	items := h.filterCurrentCodexEvents(service.ListEvents(authIndex, 0))
+	filtered, err := filterCodexEvents(c, items)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items = filtered
+	sortBy, sortOrder, err := parseListSort(c, "created_at", "desc", allowedCodexEventSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		diff := compareCodexEvents(items[i], items[j], sortBy)
+		if diff == 0 {
+			diff = compareTimes(items[i].CreatedAt, items[j].CreatedAt)
+		}
+		if diff == 0 {
+			diff = compareStringsFold(items[i].ID, items[j].ID)
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	paged, pageInfo, err := parseListPageInfo(c, items, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"events":     paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+		"limit":      limit,
+	})
 }
 
 func (h *Handler) GetCodexAuthUsage(c *gin.Context) {
@@ -92,7 +251,44 @@ func (h *Handler) GetCodexAuthUsage(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex quota service unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"usage": service.ListRollups()})
+	items := h.filterCurrentCodexUsageRollups(service.ListRollups())
+	filtered, err := filterCodexUsageRollups(c, items)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	items = filtered
+	sortBy, sortOrder, err := parseListSort(c, "auth_index", "asc", allowedCodexUsageSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	sort.Slice(items, func(i, j int) bool {
+		diff := compareCodexUsageRollups(items[i], items[j], sortBy)
+		if diff == 0 {
+			diff = compareCodexUsageRollups(items[i], items[j], "auth_index")
+		}
+		if diff == 0 {
+			diff = compareStringsFold(items[i].AuthID, items[j].AuthID)
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+	paged, pageInfo, err := parseListPageInfo(c, items, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"usage":      paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+	})
 }
 
 func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
@@ -112,9 +308,336 @@ func (h *Handler) GetCodexAuthConfig(c *gin.Context) {
 			OverrideRaw: filterCodexPayloadRules(h.cfg.Payload.OverrideRaw),
 			Filter:      filterCodexPayloadFilterRules(h.cfg.Payload.Filter),
 		},
+		Guide: codexConfigGuideResponse{
+			ContextWindows: codexContextWindowsGuideResponse{
+				GPT5MaxContextTokens:                1050000,
+				GPT41MaxContextTokens:               1047576,
+				GPT5SupportsOfficialOneMillion:      true,
+				OfficialOneMillionRecommendedFamily: "gpt-5.4",
+			},
+			HeaderFields: []codexHeaderFieldHintResponse{
+				{
+					ID:          "user_agent",
+					Label:       "User-Agent",
+					ValueType:   "string",
+					Description: "Overrides the Codex/OpenAI User-Agent header sent upstream.",
+					Example:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Codex/1.0",
+				},
+				{
+					ID:          "beta_features",
+					Label:       "Beta features",
+					ValueType:   "string",
+					Description: "Comma-separated beta feature header value for Codex/OpenAI upstreams that require it.",
+					Example:     "responses-v1,reasoning_summaries",
+				},
+			},
+			RuleTargets: []codexRuleTargetGuideResponse{
+				{
+					ID:          "default",
+					Title:       "payload.default",
+					Raw:         false,
+					Description: "Set a field only when the incoming payload does not already contain it.",
+				},
+				{
+					ID:          "default_raw",
+					Title:       "payload.default_raw",
+					Raw:         true,
+					Description: "Set a missing field using a raw JSON fragment string.",
+				},
+				{
+					ID:          "override",
+					Title:       "payload.override",
+					Raw:         false,
+					Description: "Always overwrite the target field with the configured value.",
+				},
+				{
+					ID:          "override_raw",
+					Title:       "payload.override_raw",
+					Raw:         true,
+					Description: "Always overwrite the target field using a raw JSON fragment string.",
+				},
+				{
+					ID:          "filter",
+					Title:       "payload.filter",
+					Raw:         false,
+					Description: "Remove fields from the outgoing payload by JSON path.",
+				},
+			},
+			FieldGroups: []codexFieldGroupResponse{
+				{
+					ID:          "request_basics",
+					Title:       "Request basics",
+					Description: "Common request controls that are safe to expose as standard form fields.",
+					RuleTargets: []string{"default", "override"},
+					Paths:       []string{"instructions", "max_output_tokens", "store", "background", "truncation", "safety_identifier", "service_tier"},
+				},
+				{
+					ID:          "gpt5_controls",
+					Title:       "GPT-5 controls",
+					Description: "GPT-5 family options documented in the Responses API.",
+					RuleTargets: []string{"default", "override"},
+					Paths:       []string{"reasoning.effort", "reasoning.summary", "text.verbosity"},
+				},
+				{
+					ID:          "structured_output",
+					Title:       "Structured output",
+					Description: "Raw JSON settings that should use a structured editor instead of a plain text box.",
+					RuleTargets: []string{"default_raw", "override_raw"},
+					Paths:       []string{"response_format"},
+				},
+				{
+					ID:          "payload_filter",
+					Title:       "Filter paths",
+					Description: "Common payload paths that can be removed before forwarding the request upstream.",
+					RuleTargets: []string{"filter"},
+					Paths:       []string{"parallel_tool_calls", "response_format", "reasoning.effort", "reasoning.summary", "text.verbosity", "store", "background", "service_tier"},
+				},
+			},
+			FieldHints: []codexPayloadFieldHintResponse{
+				{
+					Path:        "instructions",
+					Label:       "Instructions",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Sets top-level instructions for Codex/OpenAI requests.",
+					Example:     "Prefer concise answers and keep markdown minimal.",
+					Official:    true,
+				},
+				{
+					Path:        "reasoning.effort",
+					Label:       "Reasoning effort",
+					ValueType:   "string",
+					RuleTargets: []string{"override"},
+					Description: "Controls GPT-5 reasoning depth.",
+					Enum:        []string{"minimal", "low", "medium", "high"},
+					Example:     "high",
+					Official:    true,
+				},
+				{
+					Path:        "reasoning.summary",
+					Label:       "Reasoning summary",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Requests a reasoning summary in the Responses API. Use auto unless your upstream documents a narrower mode.",
+					Example:     "auto",
+					Official:    true,
+				},
+				{
+					Path:        "text.verbosity",
+					Label:       "Text verbosity",
+					ValueType:   "string",
+					RuleTargets: []string{"override"},
+					Description: "Controls GPT-5 response verbosity.",
+					Enum:        []string{"low", "medium", "high"},
+					Example:     "low",
+					Official:    true,
+				},
+				{
+					Path:        "max_output_tokens",
+					Label:       "Max output tokens",
+					ValueType:   "number",
+					RuleTargets: []string{"default", "override"},
+					Description: "Caps response output tokens for supported Codex/OpenAI requests.",
+					Example:     32768,
+					Official:    true,
+				},
+				{
+					Path:        "response_format",
+					Label:       "Response format",
+					ValueType:   "raw_json",
+					RuleTargets: []string{"default_raw", "override_raw"},
+					Description: "Sets a raw JSON response format object. Use only when your upstream expects the Responses API response_format structure.",
+					Example:     "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\"}}}",
+					Official:    true,
+				},
+				{
+					Path:        "store",
+					Label:       "Store response",
+					ValueType:   "boolean",
+					RuleTargets: []string{"default", "override"},
+					Description: "Controls whether the upstream stores the response for later retrieval when supported.",
+					Example:     false,
+					Official:    true,
+				},
+				{
+					Path:        "background",
+					Label:       "Background mode",
+					ValueType:   "boolean",
+					RuleTargets: []string{"default", "override"},
+					Description: "Runs the request asynchronously through the Responses API background mode. Background mode requires store=true.",
+					Example:     true,
+					Official:    true,
+				},
+				{
+					Path:        "truncation",
+					Label:       "Truncation strategy",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Controls what the Responses API does when the input would exceed the model context window.",
+					Enum:        []string{"disabled", "auto"},
+					Example:     "auto",
+					Official:    true,
+				},
+				{
+					Path:        "safety_identifier",
+					Label:       "Safety identifier",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Stable end-user identifier for OpenAI safety systems. Hash your user identifier before sending it upstream.",
+					Example:     "user_123456",
+					Official:    true,
+				},
+				{
+					Path:        "service_tier",
+					Label:       "Service tier",
+					ValueType:   "string",
+					RuleTargets: []string{"default", "override"},
+					Description: "Request-level processing tier for supported OpenAI endpoints. Use priority only when the upstream project is enabled for it.",
+					Example:     "priority",
+					Official:    true,
+				},
+			},
+			FilterPaths: []codexFilterPathHintResponse{
+				{
+					Path:        "parallel_tool_calls",
+					Label:       "parallel_tool_calls",
+					Description: "Remove this when the upstream does not support parallel tool calls.",
+				},
+				{
+					Path:        "response_format",
+					Label:       "response_format",
+					Description: "Remove structured output settings for upstreams that only accept plain text.",
+				},
+				{
+					Path:        "reasoning.effort",
+					Label:       "reasoning.effort",
+					Description: "Remove this when the target model ignores or rejects reasoning controls.",
+				},
+				{
+					Path:        "reasoning.summary",
+					Label:       "reasoning.summary",
+					Description: "Remove this when the upstream does not expose reasoning summaries.",
+				},
+				{
+					Path:        "text.verbosity",
+					Label:       "text.verbosity",
+					Description: "Remove this when the upstream does not support GPT-5 verbosity controls.",
+				},
+				{
+					Path:        "store",
+					Label:       "store",
+					Description: "Remove this when an upstream enforces its own storage policy.",
+				},
+				{
+					Path:        "background",
+					Label:       "background",
+					Description: "Remove this when the upstream does not support background responses.",
+				},
+				{
+					Path:        "service_tier",
+					Label:       "service_tier",
+					Description: "Remove this when the upstream ignores or rejects priority processing fields.",
+				},
+			},
+			Presets: []codexPayloadPresetResponse{
+				{
+					ID:          "gpt5_high_reasoning",
+					Title:       "GPT-5 high reasoning",
+					Description: "Use payload.override to raise GPT-5 reasoning effort.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"reasoning.effort": "high"},
+				},
+				{
+					ID:          "gpt5_low_verbosity",
+					Title:       "GPT-5 low verbosity",
+					Description: "Use payload.override to make GPT-5 outputs shorter.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"text.verbosity": "low"},
+				},
+				{
+					ID:          "shared_instructions",
+					Title:       "Shared instructions",
+					Description: "Use payload.default to inject shared instructions when the caller does not provide them.",
+					RuleTarget:  "default",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "*", Protocol: "codex"}},
+					Params:      map[string]any{"instructions": "Keep answers concise."},
+				},
+				{
+					ID:          "responses_json_schema",
+					Title:       "Responses JSON schema",
+					Description: "Use payload.override_raw to force a response_format JSON schema object.",
+					RuleTarget:  "override_raw",
+					Raw:         true,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+					Params: map[string]any{
+						"response_format": "{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"answer\",\"schema\":{\"type\":\"object\",\"properties\":{\"result\":{\"type\":\"string\"}},\"required\":[\"result\"]}}}",
+					},
+				},
+				{
+					ID:          "drop_parallel_tool_calls",
+					Title:       "Remove parallel_tool_calls",
+					Description: "Use payload.filter to strip a field before the request reaches an upstream that does not support it.",
+					RuleTarget:  "filter",
+					Raw:         false,
+					Official:    false,
+					Models:      []config.PayloadModelRule{{Name: "*", Protocol: "codex"}},
+					Paths:       []string{"parallel_tool_calls"},
+				},
+				{
+					ID:          "background_long_tasks",
+					Title:       "Background long tasks",
+					Description: "Use payload.override to enable background mode together with store=true for long-running GPT-5 style requests.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"background": true, "store": true},
+				},
+				{
+					ID:          "priority_processing",
+					Title:       "Priority processing",
+					Description: "Use payload.override to request service_tier=priority on supported OpenAI upstreams.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-*", Protocol: "codex"}},
+					Params:      map[string]any{"service_tier": "priority"},
+				},
+				{
+					ID:          "reasoning_summary_auto",
+					Title:       "Reasoning summary auto",
+					Description: "Use payload.override to request reasoning summaries when the upstream supports them.",
+					RuleTarget:  "override",
+					Raw:         false,
+					Official:    true,
+					Models:      []config.PayloadModelRule{{Name: "gpt-5*", Protocol: "codex"}},
+					Params:      map[string]any{"reasoning.summary": "auto"},
+				},
+			},
+			OfficialDocs: map[string]string{
+				"background":      "https://platform.openai.com/docs/guides/background",
+				"models":          "https://platform.openai.com/docs/models",
+				"priority":        "https://platform.openai.com/docs/guides/priority-processing",
+				"reasoning":       "https://platform.openai.com/docs/guides/reasoning",
+				"safety":          "https://platform.openai.com/docs/guides/safety-checks",
+				"text_generation": "https://platform.openai.com/docs/guides/text?api-mode=responses",
+				"responses_api":   "https://platform.openai.com/docs/api-reference/responses",
+			},
+		},
 		Notes: map[string]any{
-			"custom_params":              "Use payload rules to add Codex-specific request fields such as instructions or custom context controls.",
-			"one_million_context":        "This repository does not expose a dedicated 1m context field. Configure it through Codex payload rules if your upstream accepts it.",
+			"custom_params":              "Use payload rules to add Codex-specific request fields or upstream-specific custom fields.",
+			"long_context_behavior":      "payload.override.truncation=auto only tells the Responses API to trim older input items when a request would exceed the model context window. It does not enable 1M context for models that do not already support it.",
+			"one_million_context":        "OpenAI public docs now list gpt-5.4 with a 1.05M-token context window. Official 1M+ context is a model capability, not a separate payload.override switch.",
+			"one_million_context_config": "For official OpenAI gpt-5.4, do not add a one_million_context flag. Use payload.override only for normal request fields such as reasoning.effort, text.verbosity, truncation, or service_tier. Only add a custom 1m field when a non-OpenAI compatible upstream explicitly documents one.",
 			"recovered_tokens_available": false,
 		},
 	})
@@ -159,12 +682,307 @@ func (h *Handler) PutCodexAuthConfig(c *gin.Context) {
 	h.persist(c)
 }
 
-func (h *Handler) ServeCodexAuthPage(c *gin.Context) {
-	c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(codexAuthManagementPage))
+type codexAuthIdentitySet struct {
+	authIDs     map[string]struct{}
+	authIndexes map[string]struct{}
 }
 
-func (h *Handler) ServeCodexAuthInjectScript(c *gin.Context) {
-	c.Data(http.StatusOK, "application/javascript; charset=utf-8", []byte(codexAuthInjectScript))
+func (h *Handler) currentCodexAuthSet() *codexAuthIdentitySet {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	auths := h.authManager.List()
+	if len(auths) == 0 {
+		return &codexAuthIdentitySet{
+			authIDs:     map[string]struct{}{},
+			authIndexes: map[string]struct{}{},
+		}
+	}
+	ids := make(map[string]struct{}, len(auths))
+	indexes := make(map[string]struct{}, len(auths))
+	for _, auth := range auths {
+		if !isCodexManagementAuth(auth) {
+			continue
+		}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			ids[authID] = struct{}{}
+		}
+		if authIndex := strings.TrimSpace(auth.EnsureIndex()); authIndex != "" {
+			indexes[authIndex] = struct{}{}
+		}
+	}
+	return &codexAuthIdentitySet{
+		authIDs:     ids,
+		authIndexes: indexes,
+	}
+}
+
+func (h *Handler) currentCodexAuthExists(authID, authIndex string) bool {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return true
+	}
+	authID = strings.TrimSpace(authID)
+	authIndex = strings.TrimSpace(authIndex)
+	if authID != "" {
+		_, ok := authSet.authIDs[authID]
+		return ok
+	}
+	if authIndex != "" {
+		_, ok := authSet.authIndexes[authIndex]
+		return ok
+	}
+	return false
+}
+
+func (h *Handler) filterCurrentCodexSnapshotViews(items []codexquota.SnapshotView) []codexquota.SnapshotView {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return items
+	}
+	filtered := make([]codexquota.SnapshotView, 0, len(items))
+	for _, item := range items {
+		if currentCodexAuthMatches(authSet, item.AuthID, item.AuthIndex) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) filterCurrentCodexUsageRollups(items []codexquota.UsageRollup) []codexquota.UsageRollup {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return items
+	}
+	filtered := make([]codexquota.UsageRollup, 0, len(items))
+	for _, item := range items {
+		if currentCodexAuthMatches(authSet, item.AuthID, item.AuthIndex) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) filterCurrentCodexEvents(items []codexquota.Event) []codexquota.Event {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return items
+	}
+	filtered := make([]codexquota.Event, 0, len(items))
+	for _, item := range items {
+		if currentCodexAuthMatches(authSet, item.AuthID, item.AuthIndex) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func currentCodexAuthMatches(authSet *codexAuthIdentitySet, authID, authIndex string) bool {
+	if authSet == nil {
+		return true
+	}
+	authID = strings.TrimSpace(authID)
+	authIndex = strings.TrimSpace(authIndex)
+	if authID != "" {
+		if _, ok := authSet.authIDs[authID]; ok {
+			return true
+		}
+	}
+	if authIndex != "" {
+		if _, ok := authSet.authIndexes[authIndex]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexManagementAuth(auth *coreauth.Auth) bool {
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
+}
+
+var allowedCodexQuotaSortFields = map[string]struct{}{
+	"account":           {},
+	"auth_id":           {},
+	"auth_index":        {},
+	"last_refreshed_at": {},
+	"last_requested_at": {},
+	"next_recover_at":   {},
+	"quota_exceeded":    {},
+	"request_count":     {},
+	"status":            {},
+	"total_tokens":      {},
+	"updated_at":        {},
+}
+
+var allowedCodexUsageSortFields = map[string]struct{}{
+	"account":           {},
+	"auth_id":           {},
+	"auth_index":        {},
+	"avg_total_tokens":  {},
+	"cached_tokens":     {},
+	"input_tokens":      {},
+	"last_requested_at": {},
+	"output_tokens":     {},
+	"reasoning_tokens":  {},
+	"request_count":     {},
+	"total_tokens":      {},
+	"updated_at":        {},
+}
+
+var allowedCodexEventSortFields = map[string]struct{}{
+	"auth_id":        {},
+	"auth_index":     {},
+	"created_at":     {},
+	"event_type":     {},
+	"http_status":    {},
+	"quota_exceeded": {},
+	"request_count":  {},
+	"total_tokens":   {},
+}
+
+func filterCodexSnapshotViews(c *gin.Context, items []codexquota.SnapshotView) ([]codexquota.SnapshotView, error) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	status := strings.TrimSpace(c.Query("status"))
+	quotaExceeded, err := parseOptionalBool(c.Query("quota_exceeded"))
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]codexquota.SnapshotView, 0, len(items))
+	for _, item := range items {
+		if status != "" && !strings.EqualFold(strings.TrimSpace(item.Status), status) {
+			continue
+		}
+		if quotaExceeded != nil && item.QuotaExceeded != *quotaExceeded {
+			continue
+		}
+		if !matchesAnyFold(keyword, item.AuthID, item.AuthIndex, item.Account, item.FileName, item.Label, item.Status, item.QuotaReason) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func filterCodexUsageRollups(c *gin.Context, items []codexquota.UsageRollup) ([]codexquota.UsageRollup, error) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	filtered := make([]codexquota.UsageRollup, 0, len(items))
+	for _, item := range items {
+		if !matchesAnyFold(keyword, item.AuthID, item.AuthIndex, item.Account) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func filterCodexEvents(c *gin.Context, items []codexquota.Event) ([]codexquota.Event, error) {
+	keyword := strings.TrimSpace(c.Query("keyword"))
+	authID := strings.TrimSpace(c.Query("auth_id"))
+	eventType := strings.TrimSpace(c.Query("event_type"))
+	quotaExceeded, err := parseOptionalBool(c.Query("quota_exceeded"))
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]codexquota.Event, 0, len(items))
+	for _, item := range items {
+		if authID != "" && !strings.EqualFold(strings.TrimSpace(item.AuthID), authID) {
+			continue
+		}
+		if eventType != "" && !strings.EqualFold(strings.TrimSpace(item.EventType), eventType) {
+			continue
+		}
+		if quotaExceeded != nil && item.QuotaExceeded != *quotaExceeded {
+			continue
+		}
+		if !matchesAnyFold(keyword, item.AuthID, item.AuthIndex, item.EventType, item.Reason, item.StatusMessage, item.LastError, item.QuotaReason) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered, nil
+}
+
+func compareCodexSnapshotViews(left, right codexquota.SnapshotView, sortBy string) int {
+	switch sortBy {
+	case "account":
+		return compareStringsFold(left.Account, right.Account)
+	case "auth_id":
+		return compareStringsFold(left.AuthID, right.AuthID)
+	case "last_refreshed_at":
+		return compareTimes(left.LastRefreshedAt, right.LastRefreshedAt)
+	case "last_requested_at":
+		return compareTimes(left.Usage.LastRequestedAt, right.Usage.LastRequestedAt)
+	case "next_recover_at":
+		return compareTimes(left.NextRecoverAt, right.NextRecoverAt)
+	case "quota_exceeded":
+		return compareBools(left.QuotaExceeded, right.QuotaExceeded)
+	case "request_count":
+		return compareInt64s(left.Usage.RequestCount, right.Usage.RequestCount)
+	case "status":
+		return compareStringsFold(left.Status, right.Status)
+	case "total_tokens":
+		return compareInt64s(left.Usage.TotalTokens, right.Usage.TotalTokens)
+	case "updated_at":
+		return compareTimes(left.UpdatedAt, right.UpdatedAt)
+	case "auth_index":
+		fallthrough
+	default:
+		return compareStringsFold(left.AuthIndex, right.AuthIndex)
+	}
+}
+
+func compareCodexUsageRollups(left, right codexquota.UsageRollup, sortBy string) int {
+	switch sortBy {
+	case "account":
+		return compareStringsFold(left.Account, right.Account)
+	case "auth_id":
+		return compareStringsFold(left.AuthID, right.AuthID)
+	case "avg_total_tokens":
+		return compareFloat64s(left.AvgTotalTokens, right.AvgTotalTokens)
+	case "cached_tokens":
+		return compareInt64s(left.CachedTokens, right.CachedTokens)
+	case "input_tokens":
+		return compareInt64s(left.InputTokens, right.InputTokens)
+	case "last_requested_at":
+		return compareTimes(left.LastRequestedAt, right.LastRequestedAt)
+	case "output_tokens":
+		return compareInt64s(left.OutputTokens, right.OutputTokens)
+	case "reasoning_tokens":
+		return compareInt64s(left.ReasoningTokens, right.ReasoningTokens)
+	case "request_count":
+		return compareInt64s(left.RequestCount, right.RequestCount)
+	case "total_tokens":
+		return compareInt64s(left.TotalTokens, right.TotalTokens)
+	case "updated_at":
+		return compareTimes(left.UpdatedAt, right.UpdatedAt)
+	case "auth_index":
+		fallthrough
+	default:
+		return compareStringsFold(left.AuthIndex, right.AuthIndex)
+	}
+}
+
+func compareCodexEvents(left, right codexquota.Event, sortBy string) int {
+	switch sortBy {
+	case "auth_id":
+		return compareStringsFold(left.AuthID, right.AuthID)
+	case "auth_index":
+		return compareStringsFold(left.AuthIndex, right.AuthIndex)
+	case "event_type":
+		return compareStringsFold(left.EventType, right.EventType)
+	case "http_status":
+		return compareInts(left.HTTPStatus, right.HTTPStatus)
+	case "quota_exceeded":
+		return compareBools(left.QuotaExceeded, right.QuotaExceeded)
+	case "request_count":
+		return compareInt64s(left.RequestCount, right.RequestCount)
+	case "total_tokens":
+		return compareInt64s(left.TotalTokens, right.TotalTokens)
+	case "created_at":
+		fallthrough
+	default:
+		return compareTimes(left.CreatedAt, right.CreatedAt)
+	}
 }
 
 func filterCodexPayloadRules(rules []config.PayloadRule) []config.PayloadRule {
@@ -253,439 +1071,3 @@ func (e invalidCodexRuleError) Error() string { return string(e) }
 func errInvalidCodexRule(message string) error {
 	return invalidCodexRuleError(message)
 }
-
-const codexAuthManagementPage = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Codex Auth Center</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      font-family: Arial, sans-serif;
-    }
-    body {
-      margin: 0;
-      background: #0f172a;
-      color: #e2e8f0;
-    }
-    .wrap {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    .toolbar, .grid {
-      display: grid;
-      gap: 16px;
-    }
-    .toolbar {
-      grid-template-columns: 240px 160px 160px 1fr;
-      align-items: center;
-      margin-bottom: 16px;
-    }
-    .grid {
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-    }
-    .panel {
-      background: rgba(15, 23, 42, 0.92);
-      border: 1px solid #334155;
-      border-radius: 10px;
-      padding: 16px;
-      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.25);
-    }
-    h1, h2 {
-      margin-top: 0;
-    }
-    label {
-      display: block;
-      font-size: 13px;
-      margin-bottom: 6px;
-      color: #cbd5e1;
-    }
-    input, textarea, button {
-      width: 100%;
-      box-sizing: border-box;
-      border-radius: 8px;
-      border: 1px solid #475569;
-      background: #020617;
-      color: #e2e8f0;
-      padding: 10px 12px;
-      font-size: 14px;
-    }
-    textarea {
-      min-height: 120px;
-      resize: vertical;
-      font-family: Consolas, monospace;
-    }
-    button {
-      cursor: pointer;
-      background: #1d4ed8;
-      border-color: #1d4ed8;
-      font-weight: 600;
-    }
-    button.secondary {
-      background: #334155;
-      border-color: #334155;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 13px;
-    }
-    th, td {
-      border-bottom: 1px solid #334155;
-      padding: 8px 6px;
-      text-align: left;
-      vertical-align: top;
-    }
-    code, pre {
-      font-family: Consolas, monospace;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-    .note {
-      color: #93c5fd;
-      font-size: 13px;
-      margin-bottom: 12px;
-    }
-    .status {
-      min-height: 24px;
-      color: #facc15;
-      font-size: 13px;
-    }
-    .mono {
-      font-family: Consolas, monospace;
-    }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <h1>Codex Auth Center</h1>
-    <div class="toolbar">
-      <div>
-        <label for="key">Management key</label>
-        <input id="key" type="password" placeholder="X-Management-Key">
-      </div>
-      <div>
-        <label>&nbsp;</label>
-        <button onclick="refreshAll()">Refresh all</button>
-      </div>
-      <div>
-        <label>&nbsp;</label>
-        <button class="secondary" onclick="saveConfig()">Save config</button>
-      </div>
-      <div class="status" id="status"></div>
-    </div>
-
-    <div class="grid">
-      <section class="panel">
-        <h2>Codex config</h2>
-        <div class="note">There is no dedicated 1m context field in this repo. Use payload rules for custom Codex parameters such as instructions and upstream-specific context controls.</div>
-        <label for="userAgent">codex-header-defaults.user-agent</label>
-        <input id="userAgent" type="text">
-        <label for="betaFeatures" style="margin-top:12px;">codex-header-defaults.beta-features</label>
-        <input id="betaFeatures" type="text">
-        <label for="payloadDefault" style="margin-top:12px;">payload.default (protocol=codex only)</label>
-        <textarea id="payloadDefault"></textarea>
-        <label for="payloadDefaultRaw">payload.default_raw</label>
-        <textarea id="payloadDefaultRaw"></textarea>
-        <label for="payloadOverride">payload.override</label>
-        <textarea id="payloadOverride"></textarea>
-        <label for="payloadOverrideRaw">payload.override_raw</label>
-        <textarea id="payloadOverrideRaw"></textarea>
-        <label for="payloadFilter">payload.filter</label>
-        <textarea id="payloadFilter"></textarea>
-      </section>
-
-      <section class="panel">
-        <h2>Codex accounts</h2>
-        <div class="note">Recovered tokens are not provided by the upstream contract in this repo, so the field stays empty.</div>
-        <div style="overflow:auto;">
-          <table id="accountsTable">
-            <thead>
-              <tr>
-                <th>Auth index</th>
-                <th>Account</th>
-                <th>File</th>
-                <th>Status</th>
-                <th>Quota</th>
-                <th>Recover</th>
-                <th>Requests</th>
-                <th>Avg total</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Usage rollups</h2>
-        <pre id="usageView">[]</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Events</h2>
-        <div style="display:grid; grid-template-columns: 1fr 160px; gap:12px; margin-bottom:12px;">
-          <input id="eventAuthIndex" type="text" placeholder="Optional auth_index filter">
-          <button onclick="loadEvents()">Load events</button>
-        </div>
-        <pre id="eventsView">[]</pre>
-      </section>
-
-      <section class="panel">
-        <h2>Account detail</h2>
-        <div style="display:grid; grid-template-columns: 1fr 160px; gap:12px; margin-bottom:12px;">
-          <input id="detailAuthIndex" type="text" placeholder="Auth index">
-          <button onclick="loadDetail()">Load detail</button>
-        </div>
-        <pre id="detailView">{}</pre>
-      </section>
-    </div>
-  </div>
-
-  <script>
-    function setStatus(message, isError) {
-      var el = document.getElementById('status');
-      el.textContent = message || '';
-      el.style.color = isError ? '#fca5a5' : '#93c5fd';
-    }
-
-    function keyHeaders() {
-      var key = document.getElementById('key').value.trim();
-      var headers = { 'Content-Type': 'application/json' };
-      if (key) {
-        headers['X-Management-Key'] = key;
-      }
-      return headers;
-    }
-
-    async function api(path, options) {
-      var response = await fetch(path, Object.assign({ headers: keyHeaders() }, options || {}));
-      if (!response.ok) {
-        var text = await response.text();
-        throw new Error(response.status + ': ' + text);
-      }
-      if (response.status === 204) {
-        return null;
-      }
-      return response.json();
-    }
-
-    function pretty(value) {
-      return JSON.stringify(value == null ? null : value, null, 2);
-    }
-
-    async function refreshAll() {
-      setStatus('Loading...', false);
-      try {
-        await Promise.all([loadConfig(), loadAccounts(), loadUsage(), loadEvents()]);
-        setStatus('Refreshed at ' + new Date().toLocaleString(), false);
-      } catch (error) {
-        setStatus(error.message, true);
-      }
-    }
-
-    async function loadConfig() {
-      var data = await api('/v0/management/codex-auth-config');
-      document.getElementById('userAgent').value = data.codex_header_defaults.user_agent || '';
-      document.getElementById('betaFeatures').value = data.codex_header_defaults.beta_features || '';
-      document.getElementById('payloadDefault').value = pretty(data.payload.default || []);
-      document.getElementById('payloadDefaultRaw').value = pretty(data.payload.default_raw || []);
-      document.getElementById('payloadOverride').value = pretty(data.payload.override || []);
-      document.getElementById('payloadOverrideRaw').value = pretty(data.payload.override_raw || []);
-      document.getElementById('payloadFilter').value = pretty(data.payload.filter || []);
-    }
-
-    async function saveConfig() {
-      try {
-        var body = {
-          codex_header_defaults: {
-            user_agent: document.getElementById('userAgent').value,
-            beta_features: document.getElementById('betaFeatures').value
-          },
-          payload: {
-            default: JSON.parse(document.getElementById('payloadDefault').value || '[]'),
-            default_raw: JSON.parse(document.getElementById('payloadDefaultRaw').value || '[]'),
-            override: JSON.parse(document.getElementById('payloadOverride').value || '[]'),
-            override_raw: JSON.parse(document.getElementById('payloadOverrideRaw').value || '[]'),
-            filter: JSON.parse(document.getElementById('payloadFilter').value || '[]')
-          }
-        };
-        await api('/v0/management/codex-auth-config', { method: 'PUT', body: JSON.stringify(body) });
-        setStatus('Config saved', false);
-      } catch (error) {
-        setStatus(error.message, true);
-      }
-    }
-
-    async function loadAccounts() {
-      var data = await api('/v0/management/codex-auth-quota');
-      var tbody = document.querySelector('#accountsTable tbody');
-      tbody.innerHTML = '';
-      (data.accounts || []).forEach(function (item) {
-        var tr = document.createElement('tr');
-        tr.innerHTML =
-          '<td class="mono"><button class="secondary" style="width:auto;padding:4px 8px;" onclick="selectDetail(\'' + escapeHtml(item.auth_index || '') + '\')">' + escapeHtml(item.auth_index || '') + '</button></td>' +
-          '<td>' + escapeHtml(item.account || '') + '</td>' +
-          '<td class="mono">' + escapeHtml(item.file_name || '') + '</td>' +
-          '<td>' + escapeHtml(item.status || '') + (item.disabled ? ' / disabled' : '') + '</td>' +
-          '<td>' + (item.quota_exceeded ? 'yes' : 'no') + '</td>' +
-          '<td>' + escapeHtml(item.next_recover_at || '') + '</td>' +
-          '<td>' + escapeHtml(String((item.usage || {}).request_count || 0)) + '</td>' +
-          '<td>' + escapeHtml(String((item.usage || {}).avg_total_tokens || 0)) + '</td>';
-        tbody.appendChild(tr);
-      });
-    }
-
-    async function loadUsage() {
-      var data = await api('/v0/management/codex-auth-usage');
-      document.getElementById('usageView').textContent = pretty(data.usage || []);
-    }
-
-    async function loadEvents() {
-      var authIndex = document.getElementById('eventAuthIndex').value.trim();
-      var path = '/v0/management/codex-auth-events?limit=100';
-      if (authIndex) {
-        path += '&auth_index=' + encodeURIComponent(authIndex);
-      }
-      var data = await api(path);
-      document.getElementById('eventsView').textContent = pretty(data.events || []);
-    }
-
-    function selectDetail(authIndex) {
-      document.getElementById('detailAuthIndex').value = authIndex;
-      loadDetail();
-    }
-
-    async function loadDetail() {
-      var authIndex = document.getElementById('detailAuthIndex').value.trim();
-      if (!authIndex) {
-        setStatus('auth_index is required for detail', true);
-        return;
-      }
-      try {
-        var data = await api('/v0/management/codex-auth-quota/' + encodeURIComponent(authIndex));
-        document.getElementById('detailView').textContent = pretty(data);
-        setStatus('Loaded detail for ' + authIndex, false);
-      } catch (error) {
-        setStatus(error.message, true);
-      }
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#39;');
-    }
-
-    window.addEventListener('message', function(event) {
-      if (!event || !event.data || event.data.type !== 'codex-management-key') {
-        return;
-      }
-      document.getElementById('key').value = typeof event.data.value === 'string' ? event.data.value : '';
-    });
-  </script>
-</body>
-</html>`
-
-const codexAuthInjectScript = `(function () {
-  if (window.__codexAuthCenterInjected) {
-    return;
-  }
-  window.__codexAuthCenterInjected = true;
-
-  var iframe = null;
-  var overlay = null;
-  var keyInput = null;
-
-  var styles = document.createElement('style');
-  styles.textContent = [
-    '#codex-auth-launcher{position:fixed;right:24px;bottom:24px;z-index:2147483640;display:inline-flex;align-items:center;gap:8px;padding:12px 16px;border:none;border-radius:999px;background:#2563eb;color:#fff;font:600 14px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 12px 30px rgba(15,23,42,.35);cursor:pointer;}',
-    '#codex-auth-overlay{position:fixed;inset:0;z-index:2147483641;display:none;background:rgba(15,23,42,.72);backdrop-filter:blur(4px);}',
-    '#codex-auth-overlay[data-open="true"]{display:flex;align-items:center;justify-content:center;padding:32px;}',
-    '#codex-auth-modal{width:min(1280px,96vw);height:min(900px,92vh);display:flex;flex-direction:column;background:#020617;border:1px solid #1e293b;border-radius:18px;overflow:hidden;box-shadow:0 24px 80px rgba(15,23,42,.55);}',
-    '#codex-auth-header{display:flex;align-items:center;gap:12px;padding:16px 20px;border-bottom:1px solid #1e293b;background:#0f172a;color:#e2e8f0;font:500 14px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}',
-    '#codex-auth-header strong{font-size:16px;margin-right:auto;}',
-    '#codex-auth-key{width:min(320px,42vw);padding:10px 12px;border:1px solid #334155;border-radius:10px;background:#020617;color:#e2e8f0;}',
-    '#codex-auth-close{padding:10px 14px;border:none;border-radius:10px;background:#1d4ed8;color:#fff;cursor:pointer;}',
-    '#codex-auth-frame{flex:1;border:none;background:#020617;}'
-  ].join('');
-  document.head.appendChild(styles);
-
-  var launcher = document.createElement('button');
-  launcher.type = 'button';
-  launcher.id = 'codex-auth-launcher';
-  launcher.textContent = 'Codex 管理';
-  launcher.addEventListener('click', function () {
-    ensureOverlay();
-    overlay.setAttribute('data-open', 'true');
-    syncKeyToFrame();
-  });
-  document.body.appendChild(launcher);
-
-  function ensureOverlay() {
-    if (overlay) {
-      return;
-    }
-
-    overlay = document.createElement('div');
-    overlay.id = 'codex-auth-overlay';
-    overlay.addEventListener('click', function (event) {
-      if (event.target === overlay) {
-        overlay.removeAttribute('data-open');
-      }
-    });
-
-    var modal = document.createElement('div');
-    modal.id = 'codex-auth-modal';
-
-    var header = document.createElement('div');
-    header.id = 'codex-auth-header';
-
-    var title = document.createElement('strong');
-    title.textContent = 'Codex Auth Center';
-    header.appendChild(title);
-
-    keyInput = document.createElement('input');
-    keyInput.id = 'codex-auth-key';
-    keyInput.type = 'password';
-    keyInput.placeholder = '同步 X-Management-Key';
-    keyInput.addEventListener('input', syncKeyToFrame);
-    header.appendChild(keyInput);
-
-    var closeButton = document.createElement('button');
-    closeButton.type = 'button';
-    closeButton.id = 'codex-auth-close';
-    closeButton.textContent = '关闭';
-    closeButton.addEventListener('click', function () {
-      overlay.removeAttribute('data-open');
-    });
-    header.appendChild(closeButton);
-
-    iframe = document.createElement('iframe');
-    iframe.id = 'codex-auth-frame';
-    iframe.src = '/management-codex-auth.html';
-    iframe.referrerPolicy = 'same-origin';
-    iframe.addEventListener('load', syncKeyToFrame);
-
-    modal.appendChild(header);
-    modal.appendChild(iframe);
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
-  }
-
-  function syncKeyToFrame() {
-    if (!iframe || !iframe.contentWindow || !keyInput) {
-      return;
-    }
-    iframe.contentWindow.postMessage({
-      type: 'codex-management-key',
-      value: keyInput.value || ''
-    }, window.location.origin);
-  }
-})();`

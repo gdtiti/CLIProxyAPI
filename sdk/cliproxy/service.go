@@ -428,13 +428,6 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
-	if s == nil || strings.TrimSpace(id) == "" || s.coreManager == nil {
-		return
-	}
-	id = strings.TrimSpace(id)
-	if existing, ok := s.coreManager.GetByID(id); ok && existing != nil && strings.EqualFold(strings.TrimSpace(existing.Provider), "codex") {
-		executor.CloseCodexWebsocketSessionsForAuthID(existing.ID, "auth_removed")
-	}
 	s.applyCoreAuthRemovalWithReason(ctx, id, "", false)
 }
 

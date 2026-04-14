@@ -10,6 +10,7 @@ import (
 const (
 	persistedRuntimeStateKey       = "cliproxy_runtime_state"
 	persistedUnauthorizedRetention = 24 * time.Hour
+	persistedRefreshHistoryLimit   = 100
 )
 
 // PersistedRuntimeStateMetadataKey is the metadata key used to store auth runtime
@@ -23,12 +24,30 @@ type persistedRuntimeState struct {
 type persistedAuthRuntime struct {
 	RequestCount         int                            `json:"request_count,omitempty"`
 	UnauthorizedFailures []string                       `json:"unauthorized_failures,omitempty"`
+	RefreshHistory       []persistedRefreshHistoryEntry `json:"refresh_history,omitempty"`
 	Status               Status                         `json:"status,omitempty"`
 	StatusMessage        string                         `json:"status_message,omitempty"`
 	Unavailable          bool                           `json:"unavailable,omitempty"`
 	NextRetryAfter       string                         `json:"next_retry_after,omitempty"`
 	Quota                *persistedQuotaState           `json:"quota,omitempty"`
 	ModelStates          map[string]persistedModelState `json:"model_states,omitempty"`
+}
+
+// RefreshHistoryEntry describes one persisted automatic refresh attempt.
+type RefreshHistoryEntry struct {
+	At        time.Time `json:"at"`
+	Trigger   string    `json:"trigger,omitempty"`
+	Result    string    `json:"result,omitempty"`
+	Message   string    `json:"message,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+}
+
+type persistedRefreshHistoryEntry struct {
+	At        string `json:"at,omitempty"`
+	Trigger   string `json:"trigger,omitempty"`
+	Result    string `json:"result,omitempty"`
+	Message   string `json:"message,omitempty"`
+	ExpiresAt string `json:"expires_at,omitempty"`
 }
 
 type persistedModelState struct {
@@ -93,6 +112,50 @@ func RecordCompletedRequest(auth *Auth) int {
 	state.setEntry(auth.ID, entry)
 	storePersistedRuntimeState(auth, state)
 	return entry.RequestCount
+}
+
+// RecordRefreshHistory appends one refresh-history record for the auth.
+func RecordRefreshHistory(auth *Auth, now time.Time, trigger, result, message string, expiresAt time.Time) int {
+	if auth == nil {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	state, _ := loadPersistedRuntimeState(auth.Metadata)
+	entry := state.entryFor(auth.ID)
+	entry.RefreshHistory = append(entry.RefreshHistory, newPersistedRefreshHistoryEntry(now, trigger, result, message, expiresAt))
+	entry.RefreshHistory = trimPersistedRefreshHistory(entry.RefreshHistory)
+	state.setEntry(auth.ID, entry)
+	storePersistedRuntimeState(auth, state)
+	return len(entry.RefreshHistory)
+}
+
+// ListRefreshHistory returns the persisted refresh history for the auth.
+func ListRefreshHistory(auth *Auth) []RefreshHistoryEntry {
+	if auth == nil {
+		return nil
+	}
+	state, ok := loadPersistedRuntimeState(auth.Metadata)
+	if !ok {
+		return nil
+	}
+	entry, ok := state.Auths[strings.TrimSpace(auth.ID)]
+	if !ok || len(entry.RefreshHistory) == 0 {
+		return nil
+	}
+	out := make([]RefreshHistoryEntry, 0, len(entry.RefreshHistory))
+	for _, persisted := range entry.RefreshHistory {
+		item, ok := parsePersistedRefreshHistoryEntry(persisted)
+		if !ok {
+			continue
+		}
+		out = append(out, item)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // ClearUnauthorizedFailureHistory removes persisted 401 timestamps for the auth.
@@ -349,12 +412,65 @@ func (s *persistedRuntimeState) setEntry(authID string, entry persistedAuthRunti
 func (e persistedAuthRuntime) empty() bool {
 	return e.RequestCount == 0 &&
 		len(e.UnauthorizedFailures) == 0 &&
+		len(e.RefreshHistory) == 0 &&
 		e.Status == "" &&
 		strings.TrimSpace(e.StatusMessage) == "" &&
 		!e.Unavailable &&
 		strings.TrimSpace(e.NextRetryAfter) == "" &&
 		e.Quota == nil &&
 		len(e.ModelStates) == 0
+}
+
+func newPersistedRefreshHistoryEntry(now time.Time, trigger, result, message string, expiresAt time.Time) persistedRefreshHistoryEntry {
+	entry := persistedRefreshHistoryEntry{
+		At:      now.UTC().Format(time.RFC3339Nano),
+		Trigger: strings.TrimSpace(trigger),
+		Result:  strings.TrimSpace(result),
+		Message: strings.TrimSpace(message),
+	}
+	if !expiresAt.IsZero() {
+		entry.ExpiresAt = expiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return entry
+}
+
+func trimPersistedRefreshHistory(values []persistedRefreshHistoryEntry) []persistedRefreshHistoryEntry {
+	if len(values) == 0 {
+		return nil
+	}
+	filtered := make([]persistedRefreshHistoryEntry, 0, len(values))
+	for _, item := range values {
+		if strings.TrimSpace(item.At) == "" {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	if len(filtered) <= persistedRefreshHistoryLimit {
+		return filtered
+	}
+	out := make([]persistedRefreshHistoryEntry, persistedRefreshHistoryLimit)
+	copy(out, filtered[len(filtered)-persistedRefreshHistoryLimit:])
+	return out
+}
+
+func parsePersistedRefreshHistoryEntry(entry persistedRefreshHistoryEntry) (RefreshHistoryEntry, bool) {
+	at := parsePersistedTime(entry.At)
+	if at.IsZero() {
+		return RefreshHistoryEntry{}, false
+	}
+	item := RefreshHistoryEntry{
+		At:      at,
+		Trigger: strings.TrimSpace(entry.Trigger),
+		Result:  strings.TrimSpace(entry.Result),
+		Message: strings.TrimSpace(entry.Message),
+	}
+	if expiresAt := parsePersistedTime(entry.ExpiresAt); !expiresAt.IsZero() {
+		item.ExpiresAt = expiresAt
+	}
+	return item, true
 }
 
 func persistedModelRuntimeEmpty(e persistedModelState) bool {

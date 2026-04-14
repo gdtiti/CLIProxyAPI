@@ -19,7 +19,6 @@ import (
 )
 
 func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
-	t.Parallel()
 	gin.SetMode(gin.TestMode)
 
 	authDir := t.TempDir()
@@ -82,6 +81,8 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	router := gin.New()
 	router.GET("/v0/management/codex-auth-quota", handler.GetCodexAuthQuota)
 	router.GET("/v0/management/codex-auth-quota/:auth_index", handler.GetCodexAuthQuotaByIndex)
+	router.GET("/v0/management/codex-auth-events", handler.GetCodexAuthEvents)
+	router.GET("/v0/management/codex-auth-usage", handler.GetCodexAuthUsage)
 	router.GET("/v0/management/codex-auth-config", handler.GetCodexAuthConfig)
 	router.PUT("/v0/management/codex-auth-config", handler.PutCodexAuthConfig)
 
@@ -124,6 +125,57 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	if len(configBody.Payload.Default) != 1 {
 		t.Fatalf("len(configBody.Payload.Default) = %d, want 1 pure codex rule", len(configBody.Payload.Default))
 	}
+	if configBody.Guide.ContextWindows.GPT5MaxContextTokens != 1050000 {
+		t.Fatalf("guide.context_windows.gpt5_max_context_tokens = %d, want 1050000", configBody.Guide.ContextWindows.GPT5MaxContextTokens)
+	}
+	if !configBody.Guide.ContextWindows.GPT5SupportsOfficialOneMillion {
+		t.Fatalf("guide.context_windows.gpt5_supports_official_one_million = false, want true")
+	}
+	if configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily != "gpt-5.4" {
+		t.Fatalf("guide.context_windows.official_one_million_recommended_family = %q, want %q", configBody.Guide.ContextWindows.OfficialOneMillionRecommendedFamily, "gpt-5.4")
+	}
+	if len(configBody.Guide.FieldHints) == 0 {
+		t.Fatalf("len(configBody.Guide.FieldHints) = 0, want hints")
+	}
+	if len(configBody.Guide.HeaderFields) < 2 {
+		t.Fatalf("len(configBody.Guide.HeaderFields) = %d, want at least 2", len(configBody.Guide.HeaderFields))
+	}
+	if len(configBody.Guide.RuleTargets) < 5 {
+		t.Fatalf("len(configBody.Guide.RuleTargets) = %d, want at least 5", len(configBody.Guide.RuleTargets))
+	}
+	if len(configBody.Guide.FieldGroups) < 4 {
+		t.Fatalf("len(configBody.Guide.FieldGroups) = %d, want at least 4", len(configBody.Guide.FieldGroups))
+	}
+	if len(configBody.Guide.FilterPaths) < 4 {
+		t.Fatalf("len(configBody.Guide.FilterPaths) = %d, want at least 4", len(configBody.Guide.FilterPaths))
+	}
+	if len(configBody.Guide.Presets) == 0 {
+		t.Fatalf("len(configBody.Guide.Presets) = 0, want presets")
+	}
+	if !containsCodexFieldHint(configBody.Guide.FieldHints, "background") {
+		t.Fatalf("guide.field_hints missing background")
+	}
+	if !containsCodexFieldHint(configBody.Guide.FieldHints, "truncation") {
+		t.Fatalf("guide.field_hints missing truncation")
+	}
+	if !containsCodexFieldHint(configBody.Guide.FieldHints, "service_tier") {
+		t.Fatalf("guide.field_hints missing service_tier")
+	}
+	if !containsCodexPreset(configBody.Guide.Presets, "background_long_tasks") {
+		t.Fatalf("guide.presets missing background_long_tasks")
+	}
+	if configBody.Notes["one_million_context"] == nil {
+		t.Fatalf("notes.one_million_context missing")
+	}
+	if !strings.Contains(configBody.Notes["one_million_context"].(string), "gpt-5.4") {
+		t.Fatalf("notes.one_million_context = %q, want gpt-5.4 guidance", configBody.Notes["one_million_context"])
+	}
+	if !strings.Contains(configBody.Notes["one_million_context_config"].(string), "do not add a one_million_context flag") {
+		t.Fatalf("notes.one_million_context_config = %q, want no-switch guidance", configBody.Notes["one_million_context_config"])
+	}
+	if configBody.Notes["long_context_behavior"] == nil {
+		t.Fatalf("notes.long_context_behavior missing")
+	}
 
 	putBody := `{"codex_header_defaults":{"user_agent":"new-agent","beta_features":"beta-b"},"payload":{"default":[{"models":[{"name":"gpt-*","protocol":"codex"}],"params":{"instructions":"new"}}],"default_raw":[],"override":[],"override_raw":[],"filter":[]}}`
 	rec = httptest.NewRecorder()
@@ -151,40 +203,356 @@ func TestCodexQuotaHandlersExposePersistedDataAndConfig(t *testing.T) {
 	}
 }
 
-func TestCodexAuthPagesExposeEmbeddedAndInjectedViews(t *testing.T) {
-	t.Parallel()
+func TestCodexQuotaHandlers_SupportSortAndPagination(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	authDir := t.TempDir()
+	service, err := codexquota.NewService(authDir)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	codexquota.SetDefaultService(service)
+	t.Cleanup(func() { codexquota.SetDefaultService(nil) })
+
+	manager := coreauth.NewManager(nil, nil, service.Hook())
+	service.SetAuthManager(manager)
 	handler := &Handler{}
+
+	registerAuth := func(id, fileName, account string) *coreauth.Auth {
+		t.Helper()
+		auth := &coreauth.Auth{
+			ID:       id,
+			Provider: "codex",
+			FileName: fileName,
+			Status:   coreauth.StatusActive,
+			Metadata: map[string]any{
+				"auth_method": "oauth",
+				"email":       account + "@example.com",
+			},
+		}
+		if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+			t.Fatalf("Register(%s) error = %v", id, errRegister)
+		}
+		return auth
+	}
+
+	alpha := registerAuth("codex-auth-alpha", "alpha.json", "alpha")
+	time.Sleep(10 * time.Millisecond)
+	beta := registerAuth("codex-auth-beta", "beta.json", "beta")
+
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      alpha.ID,
+		AuthIndex:   alpha.EnsureIndex(),
+		RequestedAt: time.Now().UTC().Add(-time.Minute),
+		Detail: coreusage.Detail{
+			InputTokens:  10,
+			OutputTokens: 5,
+			TotalTokens:  15,
+		},
+	})
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      beta.ID,
+		AuthIndex:   beta.EnsureIndex(),
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			InputTokens:  20,
+			OutputTokens: 7,
+			TotalTokens:  27,
+		},
+	})
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      beta.ID,
+		AuthIndex:   beta.EnsureIndex(),
+		RequestedAt: time.Now().UTC().Add(time.Second),
+		Detail: coreusage.Detail{
+			InputTokens:  5,
+			OutputTokens: 3,
+			TotalTokens:  8,
+		},
+	})
+
 	router := gin.New()
-	router.GET("/management-codex-auth.html", handler.ServeCodexAuthPage)
-	router.GET("/management-codex-auth-inject.js", handler.ServeCodexAuthInjectScript)
+	router.GET("/v0/management/codex-auth-quota", handler.GetCodexAuthQuota)
+	router.GET("/v0/management/codex-auth-events", handler.GetCodexAuthEvents)
+	router.GET("/v0/management/codex-auth-usage", handler.GetCodexAuthUsage)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/management-codex-auth.html", nil)
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota?sort_by=total_tokens&sort_order=desc&page=1&page_size=1", nil)
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("page status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("quota status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "Codex Auth Center") {
-		t.Fatalf("page body missing title: %s", body)
+	var quotaBody struct {
+		Accounts  []codexquota.SnapshotView `json:"accounts"`
+		Total     int                       `json:"total"`
+		Page      int                       `json:"page"`
+		PageSize  int                       `json:"page_size"`
+		SortBy    string                    `json:"sort_by"`
+		SortOrder string                    `json:"sort_order"`
 	}
-	if !strings.Contains(body, "codex-management-key") {
-		t.Fatalf("page body missing management key sync listener: %s", body)
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &quotaBody); errDecode != nil {
+		t.Fatalf("quota decode error = %v", errDecode)
+	}
+	if quotaBody.Total != 2 || quotaBody.Page != 1 || quotaBody.PageSize != 1 {
+		t.Fatalf("quota page info = (%d,%d,%d), want (2,1,1)", quotaBody.Total, quotaBody.Page, quotaBody.PageSize)
+	}
+	if len(quotaBody.Accounts) != 1 || quotaBody.Accounts[0].AuthID != beta.ID {
+		t.Fatalf("quota accounts[0].auth_id = %v, want %q", quotaBody.Accounts, beta.ID)
 	}
 
 	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/management-codex-auth-inject.js", nil)
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-usage?sort_by=request_count&sort_order=desc", nil)
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("inject script status = %d, body = %s", rec.Code, rec.Body.String())
+		t.Fatalf("usage status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	scriptBody := rec.Body.String()
-	if !strings.Contains(scriptBody, "/management-codex-auth.html") {
-		t.Fatalf("inject script missing iframe target: %s", scriptBody)
+	var usageBody struct {
+		Usage []codexquota.UsageRollup `json:"usage"`
 	}
-	if !strings.Contains(scriptBody, "Codex 管理") {
-		t.Fatalf("inject script missing launcher text: %s", scriptBody)
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &usageBody); errDecode != nil {
+		t.Fatalf("usage decode error = %v", errDecode)
 	}
+	if len(usageBody.Usage) != 2 {
+		t.Fatalf("len(usage) = %d, want 2", len(usageBody.Usage))
+	}
+	if usageBody.Usage[0].AuthID != beta.ID {
+		t.Fatalf("usage[0].auth_id = %q, want %q", usageBody.Usage[0].AuthID, beta.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-events?sort_order=asc", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var eventBody struct {
+		Events []codexquota.Event `json:"events"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &eventBody); errDecode != nil {
+		t.Fatalf("events decode error = %v", errDecode)
+	}
+	if len(eventBody.Events) < 2 {
+		t.Fatalf("len(events) = %d, want >= 2", len(eventBody.Events))
+	}
+	if eventBody.Events[0].CreatedAt.After(eventBody.Events[len(eventBody.Events)-1].CreatedAt) {
+		t.Fatalf("events not sorted ascending by created_at")
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota?keyword=beta&quota_exceeded=false", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quota filter status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &quotaBody); errDecode != nil {
+		t.Fatalf("quota filter decode error = %v", errDecode)
+	}
+	if len(quotaBody.Accounts) != 1 || quotaBody.Accounts[0].AuthID != beta.ID {
+		t.Fatalf("quota filtered accounts = %v, want only %q", quotaBody.Accounts, beta.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-usage?keyword=alpha", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage filter status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &usageBody); errDecode != nil {
+		t.Fatalf("usage filter decode error = %v", errDecode)
+	}
+	if len(usageBody.Usage) != 1 || usageBody.Usage[0].AuthID != alpha.ID {
+		t.Fatalf("usage filtered entries = %v, want only %q", usageBody.Usage, alpha.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-events?auth_id="+beta.ID+"&event_type=registered&quota_exceeded=false", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events filter status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &eventBody); errDecode != nil {
+		t.Fatalf("events filter decode error = %v", errDecode)
+	}
+	if len(eventBody.Events) != 1 {
+		t.Fatalf("len(filtered events) = %d, want 1", len(eventBody.Events))
+	}
+	for _, event := range eventBody.Events {
+		if event.AuthID != beta.ID || event.EventType != "registered" || event.QuotaExceeded {
+			t.Fatalf("unexpected filtered event = %+v", event)
+		}
+	}
+}
+
+func TestCodexQuotaHandlers_FilterDeletedAccountsFromPersistedViews(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	service, err := codexquota.NewService(authDir)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	codexquota.SetDefaultService(service)
+	t.Cleanup(func() { codexquota.SetDefaultService(nil) })
+
+	manager := coreauth.NewManager(nil, nil, service.Hook())
+	service.SetAuthManager(manager)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	currentAuth := &coreauth.Auth{
+		ID:       "codex-auth-current",
+		Provider: "codex",
+		FileName: "current.json",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"email": "current@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), currentAuth); errRegister != nil {
+		t.Fatalf("Register(current) error = %v", errRegister)
+	}
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      currentAuth.ID,
+		AuthIndex:   currentAuth.EnsureIndex(),
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			TotalTokens: 11,
+		},
+	})
+
+	staleAuth := &coreauth.Auth{
+		ID:       "codex-auth-stale",
+		Provider: "codex",
+		FileName: "stale.json",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"email": "stale@example.com",
+		},
+	}
+	service.HandleAuthRegistered(staleAuth)
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      staleAuth.ID,
+		AuthIndex:   staleAuth.EnsureIndex(),
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			TotalTokens: 99,
+		},
+	})
+
+	router := gin.New()
+	router.GET("/v0/management/codex-auth-quota", handler.GetCodexAuthQuota)
+	router.GET("/v0/management/codex-auth-quota/:auth_index", handler.GetCodexAuthQuotaByIndex)
+	router.GET("/v0/management/codex-auth-events", handler.GetCodexAuthEvents)
+	router.GET("/v0/management/codex-auth-usage", handler.GetCodexAuthUsage)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quota list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var quotaBody struct {
+		Accounts []codexquota.SnapshotView `json:"accounts"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &quotaBody); errDecode != nil {
+		t.Fatalf("quota list decode error = %v", errDecode)
+	}
+	if len(quotaBody.Accounts) != 1 || quotaBody.Accounts[0].AuthID != currentAuth.ID {
+		t.Fatalf("quota accounts = %+v, want only %q", quotaBody.Accounts, currentAuth.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-usage", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var usageBody struct {
+		Usage []codexquota.UsageRollup `json:"usage"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &usageBody); errDecode != nil {
+		t.Fatalf("usage list decode error = %v", errDecode)
+	}
+	if len(usageBody.Usage) != 1 || usageBody.Usage[0].AuthID != currentAuth.ID {
+		t.Fatalf("usage rollups = %+v, want only %q", usageBody.Usage, currentAuth.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-events", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var eventBody struct {
+		Events []codexquota.Event `json:"events"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &eventBody); errDecode != nil {
+		t.Fatalf("events list decode error = %v", errDecode)
+	}
+	if len(eventBody.Events) == 0 {
+		t.Fatal("events list is empty, want current auth events")
+	}
+	for _, event := range eventBody.Events {
+		if event.AuthID != currentAuth.ID {
+			t.Fatalf("event auth_id = %q, want only %q", event.AuthID, currentAuth.ID)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota/"+staleAuth.EnsureIndex(), nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("stale quota detail status = %d, want %d, body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
+func TestCodexQuotaHandlers_RejectInvalidSortBy(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	service, err := codexquota.NewService(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	codexquota.SetDefaultService(service)
+	t.Cleanup(func() { codexquota.SetDefaultService(nil) })
+
+	router := gin.New()
+	handler := &Handler{}
+	router.GET("/v0/management/codex-auth-quota", handler.GetCodexAuthQuota)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota?sort_by=unknown", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("quota status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota?quota_exceeded=maybe", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("quota invalid bool status = %d, want %d, body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func containsCodexFieldHint(hints []codexPayloadFieldHintResponse, path string) bool {
+	for _, hint := range hints {
+		if hint.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCodexPreset(presets []codexPayloadPresetResponse, id string) bool {
+	for _, preset := range presets {
+		if preset.ID == id {
+			return true
+		}
+	}
+	return false
 }

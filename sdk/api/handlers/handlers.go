@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -611,6 +612,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		return nil, nil, errChan
 	}
 	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	candidateAuthCount := countMatchingAuthCandidates(h.AuthManager, providers, normalizedModel)
 	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
 	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
 	var upstreamHeaders http.Header
@@ -692,7 +694,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
 					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
 					if !sentPayload {
-						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+						if candidateAuthCount > 1 && bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
 							bootstrapRetries++
 							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
 							if retryErr == nil {
@@ -704,6 +706,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 							}
 							streamErr = enrichAuthSelectionError(retryErr, providers, normalizedModel)
 						}
+						streamErr = normalizeBootstrapAuthSelectionError(streamErr, providers, normalizedModel, candidateAuthCount)
 					}
 
 					status := http.StatusInternalServerError
@@ -778,6 +781,60 @@ func statusFromError(err error) int {
 		}
 	}
 	return 0
+}
+
+func countMatchingAuthCandidates(manager *coreauth.Manager, providers []string, model string) int {
+	if manager == nil || len(providers) == 0 {
+		return 0
+	}
+	providerSet := make(map[string]struct{}, len(providers))
+	for _, provider := range providers {
+		provider = strings.ToLower(strings.TrimSpace(provider))
+		if provider != "" {
+			providerSet[provider] = struct{}{}
+		}
+	}
+	if len(providerSet) == 0 {
+		return 0
+	}
+	reg := registry.GetGlobalRegistry()
+	count := 0
+	for _, auth := range manager.List() {
+		if auth == nil || auth.ID == "" || auth.Disabled || auth.Status != coreauth.StatusActive {
+			continue
+		}
+		if _, ok := providerSet[strings.ToLower(strings.TrimSpace(auth.Provider))]; !ok {
+			continue
+		}
+		if model != "" && reg != nil && !reg.ClientSupportsModel(auth.ID, model) {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func normalizeBootstrapAuthSelectionError(err error, providers []string, model string, candidateCount int) error {
+	if err == nil || candidateCount > 1 {
+		return err
+	}
+	var authErr *coreauth.Error
+	if !errors.As(err, &authErr) || authErr == nil {
+		return err
+	}
+	status := statusFromError(authErr)
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+		http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return enrichAuthSelectionError(&coreauth.Error{
+			Code:       "auth_unavailable",
+			Message:    authErr.Message,
+			Retryable:  authErr.Retryable,
+			HTTPStatus: http.StatusServiceUnavailable,
+		}, providers, model)
+	default:
+		return err
+	}
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {

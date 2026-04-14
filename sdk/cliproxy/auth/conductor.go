@@ -442,6 +442,13 @@ func (m *Manager) SetRoundTripperProvider(p RoundTripperProvider) {
 	m.mu.Lock()
 	m.rtProvider = p
 	m.mu.Unlock()
+	if cfgAware, ok := p.(RoundTripperConfigAware); ok && cfgAware != nil {
+		cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+		if cfg == nil {
+			cfg = &internalconfig.Config{}
+		}
+		cfgAware.SetConfig(cfg)
+	}
 }
 
 // SetConfig updates the runtime config snapshot used by request-time helpers.
@@ -454,6 +461,12 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 		cfg = &internalconfig.Config{}
 	}
 	m.runtimeConfig.Store(cfg)
+	m.mu.RLock()
+	p := m.rtProvider
+	m.mu.RUnlock()
+	if cfgAware, ok := p.(RoundTripperConfigAware); ok && cfgAware != nil {
+		cfgAware.SetConfig(cfg)
+	}
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
 }
 
@@ -2258,24 +2271,14 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						switch statusCode {
 						case 401:
 							state.StatusMessage = "unauthorized"
-							if disableCooling {
-								state.NextRetryAfter = time.Time{}
-							} else {
-								next := now.Add(30 * time.Minute)
-								state.NextRetryAfter = next
-								suspendReason = "unauthorized"
-								shouldSuspendModel = true
-							}
-						case 402:
-							state.StatusMessage = "payment_required"
 							state.NextRetryAfter = time.Time{}
+						case 402:
 							auth.Disabled = true
 							auth.Status = StatusDisabled
 							state.Status = StatusDisabled
 							suspendReason = "payment_required"
 							shouldSuspendModel = true
 						case 403:
-							state.StatusMessage = "payment_required"
 							state.NextRetryAfter = time.Time{}
 						case 404:
 							state.StatusMessage = "not_found"
@@ -2293,13 +2296,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 						case 429:
 							next := time.Time{}
 							backoffLevel := state.Quota.BackoffLevel
-							quotaReason := quotaReasonFromWindow(result.QuotaWindow)
-							quotaMessage := quotaStatusMessage(result.QuotaWindow)
-							isCodexProvider := strings.EqualFold(strings.TrimSpace(result.Provider), "codex")
-							if isCodexProvider {
+							if strings.EqualFold(strings.TrimSpace(result.Provider), "codex") {
 								next = now.Add(codex429TemporaryDisableDuration)
 								backoffLevel = 0
-								setTemporaryDisable(auth, next, temporaryDisableReasonCodex429, quotaMessage)
+								setTemporaryDisable(auth, next, temporaryDisableReasonCodex429, quotaStatusMessage(result.QuotaWindow))
 							} else if !disableCooling {
 								if result.RetryAfter != nil {
 									next = now.Add(*result.RetryAfter)
@@ -2312,10 +2312,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								}
 							}
 							state.NextRetryAfter = next
-							state.StatusMessage = quotaMessage
+							state.StatusMessage = quotaStatusMessage(result.QuotaWindow)
 							state.Quota = QuotaState{
 								Exceeded:      true,
-								Reason:        quotaReason,
+								Reason:        quotaReasonFromWindow(result.QuotaWindow),
 								NextRecoverAt: next,
 								BackoffLevel:  backoffLevel,
 							}
@@ -2329,17 +2329,15 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 								globalState.StatusMessage = state.StatusMessage
 								globalState.Quota = QuotaState{
 									Exceeded:      true,
-									Reason:        quotaReason,
+									Reason:        quotaReasonFromWindow(result.QuotaWindow),
 									NextRecoverAt: next,
 									BackoffLevel:  backoffLevel,
 								}
 							}
 							auth.StatusMessage = state.StatusMessage
-							if isCodexProvider || !disableCooling {
-								suspendReason = "quota"
-								shouldSuspendModel = true
-								setModelQuota = true
-							}
+							suspendReason = "quota"
+							shouldSuspendModel = true
+							setModelQuota = true
 						case 408, 500, 502, 503, 504:
 							if disableCooling {
 								state.NextRetryAfter = time.Time{}
@@ -2796,11 +2794,14 @@ func applyAuthFailureState(auth *Auth, provider string, resultErr *Error, retryA
 	if auth == nil {
 		return
 	}
-
 	statusCode := statusCodeFromResult(resultErr)
+	if isRequestScopedNotFoundResultError(resultErr) {
+		return
+	}
 	if statusCode != http.StatusUnauthorized {
 		ClearUnauthorizedFailureHistory(auth)
 	}
+	disableCooling := quotaCooldownDisabledForAuth(auth)
 
 	if statusCode == http.StatusNotAcceptable {
 		auth.StatusMessage = "not_acceptable"
@@ -2808,10 +2809,6 @@ func applyAuthFailureState(auth *Auth, provider string, resultErr *Error, retryA
 		auth.UpdatedAt = now
 		return
 	}
-	if isRequestScopedNotFoundResultError(resultErr) {
-		return
-	}
-	disableCooling := quotaCooldownDisabledForAuth(auth)
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
@@ -2824,18 +2821,12 @@ func applyAuthFailureState(auth *Auth, provider string, resultErr *Error, retryA
 	switch statusCode {
 	case 401:
 		auth.StatusMessage = "unauthorized"
-		if disableCooling {
-			auth.NextRetryAfter = time.Time{}
-		} else {
-			auth.NextRetryAfter = now.Add(30 * time.Minute)
-		}
 	case 402:
 		auth.StatusMessage = "payment_required"
 		auth.NextRetryAfter = time.Time{}
 		auth.Disabled = true
 		auth.Status = StatusDisabled
 	case 403:
-		auth.StatusMessage = "payment_required"
 		auth.NextRetryAfter = time.Time{}
 	case 404:
 		auth.StatusMessage = "not_found"
@@ -3786,21 +3777,23 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
-		var snapshot *Auth
+		var persistAuth *Auth
 		m.mu.Lock()
 		if current := m.auths[id]; current != nil {
 			current.NextRefreshAfter = now.Add(refreshFailureBackoff)
 			current.LastError = &Error{Message: err.Error()}
+			RecordRefreshHistory(current, now, "auto_refresh", "error", err.Error(), time.Time{})
 			m.auths[id] = current
-			_ = m.persist(ctx, current)
-			snapshot = current.Clone()
+			snapshot := current.Clone()
 			if m.scheduler != nil {
 				m.scheduler.upsertAuth(snapshot)
 			}
+			persistAuth = snapshot
 		}
 		m.mu.Unlock()
-		if snapshot != nil {
-			m.hook.OnAuthUpdated(ctx, snapshot)
+		if persistAuth != nil {
+			_ = m.persist(ctx, persistAuth)
+			m.hook.OnAuthUpdated(ctx, persistAuth.Clone())
 		}
 		return
 	}
@@ -3818,6 +3811,8 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	// If the Authenticator did not set it (zero value), shouldRefresh will use default logic
 	updated.LastError = nil
 	updated.UpdatedAt = now
+	expiry, _ := updated.ExpirationTime()
+	RecordRefreshHistory(updated, now, "auto_refresh", "success", "", expiry)
 	_, _ = m.Update(ctx, updated)
 }
 
@@ -3844,6 +3839,11 @@ func (m *Manager) roundTripperFor(auth *Auth) http.RoundTripper {
 // RoundTripperProvider defines a minimal provider of per-auth HTTP transports.
 type RoundTripperProvider interface {
 	RoundTripperFor(auth *Auth) http.RoundTripper
+}
+
+// RoundTripperConfigAware allows a RoundTripperProvider to receive config updates.
+type RoundTripperConfigAware interface {
+	SetConfig(cfg *internalconfig.Config)
 }
 
 // RequestPreparer is an optional interface that provider executors can implement
