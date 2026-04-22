@@ -94,6 +94,8 @@ type apiCallResponse struct {
 //  2. Global config proxy-url
 //  3. Direct connect (environment proxies are not used)
 //
+// When ignore-auth-file-proxy-url is enabled, file-backed auth records skip step 1.
+//
 // Response (returned with HTTP 200 when the APICall itself succeeds):
 //
 //	Format matches request Content-Type (application/json or application/cbor)
@@ -699,8 +701,10 @@ func (h *Handler) authByIndex(authIndex string) *coreauth.Auth {
 func (h *Handler) apiCallTransport(auth *coreauth.Auth) http.RoundTripper {
 	var proxyCandidates []string
 	if auth != nil {
-		if proxyStr := executorhelps.ResolveAuthProxyURL(h.cfg, auth); proxyStr != "" {
-			proxyCandidates = append(proxyCandidates, proxyStr)
+		if !executorhelps.ShouldIgnoreAuthFileProxyURL(h.cfg, auth) {
+			if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
+				proxyCandidates = append(proxyCandidates, proxyStr)
+			}
 		}
 		if h != nil && h.cfg != nil {
 			if proxyStr := strings.TrimSpace(proxyURLFromAPIKeyConfig(h.cfg, auth)); proxyStr != "" {

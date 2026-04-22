@@ -707,7 +707,15 @@ func newProxyAwareWebsocketDialer(cfg *config.Config, auth *cliproxyauth.Auth) *
 		}).DialContext,
 	}
 
-	proxyURL := helps.ResolveProxyURL(cfg, auth)
+	proxyURL := ""
+	if auth != nil {
+		if !helps.ShouldIgnoreAuthFileProxyURL(cfg, auth) {
+			proxyURL = strings.TrimSpace(auth.ProxyURL)
+		}
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
 	if proxyURL == "" {
 		return dialer
 	}
@@ -816,7 +824,7 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	}
 
 	profile := buildCodexSignatureProfile(cfg, auth)
-	_, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
+	cfgUserAgent, cfgBetaFeatures := codexHeaderDefaults(cfg, auth)
 	if profile.Strict() && profile.BetaFeatures != "" {
 		headers.Set("x-codex-beta-features", profile.BetaFeatures)
 	} else {
@@ -882,10 +890,10 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	if profile.Strict() {
 		headers.Set("User-Agent", profile.UserAgent)
 	} else {
-		if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
-			misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
-		}
-		headers.Del("User-Agent")
+		ensureHeaderWithConfigPrecedence(headers, ginHeaders, "User-Agent", cfgUserAgent, codexUserAgent)
+	}
+	if strings.Contains(headers.Get("User-Agent"), "Mac OS") {
+		misc.EnsureHeader(headers, ginHeaders, "Session_id", uuid.NewString())
 	}
 
 	isAPIKey := profile.IsAPIKey

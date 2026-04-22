@@ -106,3 +106,7 @@ _bmad-output/*
 *.bak
 .project/attachments/files/**
 .ace-tool/
+/bin
+/.tmp-go
+/.tmp-go-analyze
+.tmp-go-build

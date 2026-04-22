@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
@@ -26,18 +27,33 @@ func newDefaultRoundTripperProvider(cfg *internalconfig.Config) *defaultRoundTri
 	}
 }
 
+func (p *defaultRoundTripperProvider) SetConfig(cfg *internalconfig.Config) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cfg = cfg
+}
+
 func (p *defaultRoundTripperProvider) resolveProxy(auth *coreauth.Auth) (string, bool) {
 	if auth == nil {
 		return "", false
 	}
-	if p.cfg != nil && p.cfg.IgnoreAuthFileProxyURL && strings.TrimSpace(auth.FileName) != "" {
-		return strings.TrimSpace(p.cfg.ProxyURL), true
+	p.mu.RLock()
+	cfg := p.cfg
+	p.mu.RUnlock()
+	if helps.ShouldIgnoreAuthFileProxyURL(cfg, auth) {
+		if cfg == nil {
+			return "", true
+		}
+		return strings.TrimSpace(cfg.ProxyURL), true
 	}
 	if proxyStr := strings.TrimSpace(auth.ProxyURL); proxyStr != "" {
 		return proxyStr, false
 	}
-	if p.cfg != nil {
-		return strings.TrimSpace(p.cfg.ProxyURL), false
+	if cfg != nil {
+		return strings.TrimSpace(cfg.ProxyURL), false
 	}
 	return "", false
 }

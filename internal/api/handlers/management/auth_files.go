@@ -70,6 +70,31 @@ type authFilesStorePersister interface {
 	PersistAuthFiles(ctx context.Context, message string, paths ...string) error
 }
 
+type authFilesPagination struct {
+	Total    int  `json:"total"`
+	Offset   int  `json:"offset"`
+	Limit    int  `json:"limit"`
+	Returned int  `json:"returned"`
+	HasMore  bool `json:"has_more"`
+}
+
+type authFilesFilters struct {
+	Name         string
+	Provider     string
+	Status       string
+	State        string
+	Email        string
+	Prefix       string
+	ProxyURL     string
+	AuthIndex    string
+	QuotaLevel   string
+	QuotaChecked *bool
+	RuntimeOnly  *bool
+	Disabled     *bool
+	Expired      *bool
+	HasExpiry    *bool
+}
+
 type callbackForwarder struct {
 	provider string
 	server   *http.Server
@@ -161,7 +186,7 @@ func startCallbackForwarder(port int, provider, targetBase string) (*callbackFor
 		stopForwarderInstance(port, prev)
 	}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := fmt.Sprintf("0.0.0.0:%d", port)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on %s: %w", addr, err)
@@ -261,8 +286,9 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "handler not initialized"})
 		return
 	}
+	filters := buildAuthFilesFilters(c)
 	if h.authManager == nil {
-		h.listAuthFilesFromDisk(c)
+		h.listAuthFilesFromDisk(c, filters)
 		return
 	}
 	auths := h.authManager.List()
@@ -272,7 +298,527 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			files = append(files, entry)
 		}
 	}
+	files = filterAuthFileEntries(files, filters)
 	h.writeAuthFilesListResponse(c, files)
+}
+
+func buildAuthFilesFilters(c *gin.Context) authFilesFilters {
+	provider := c.Query("provider")
+	typeValue := c.Query("type")
+	proxyURL := c.Query("proxy_url")
+	proxy := c.Query("proxy")
+	authIndex := c.Query("auth_index")
+	index := c.Query("index")
+	return authFilesFilters{
+		Name:         normalizeAuthFilesFilterValue(c.Query("name")),
+		Provider:     normalizeAuthFilesFilterValue(firstNonEmptyString(&provider, &typeValue)),
+		Status:       normalizeAuthFilesFilterValue(c.Query("status")),
+		State:        normalizeAuthFilesStateFilterValue(c.Query("state")),
+		Email:        normalizeAuthFilesFilterValue(c.Query("email")),
+		Prefix:       normalizeAuthFilesFilterValue(c.Query("prefix")),
+		ProxyURL:     normalizeAuthFilesFilterValue(firstNonEmptyString(&proxyURL, &proxy)),
+		AuthIndex:    normalizeAuthFilesFilterValue(firstNonEmptyString(&authIndex, &index)),
+		QuotaLevel:   normalizeAuthFilesQuotaLevel(firstNonEmptyString(strPtr(c.Query("quota_level")), strPtr(c.Query("quota_status")))),
+		QuotaChecked: parseAuthFilesListBoolPtr(c.Query("quota_checked")),
+		RuntimeOnly:  parseAuthFilesListBoolPtr(c.Query("runtime_only")),
+		Disabled:     parseAuthFilesListBoolPtr(c.Query("disabled")),
+		Expired:      parseAuthFilesListBoolPtr(c.Query("expired")),
+		HasExpiry:    parseAuthFilesListBoolPtr(c.Query("has_expiry")),
+	}
+}
+
+func filterAuthFileEntries(files []gin.H, filters authFilesFilters) []gin.H {
+	if !hasAuthFilesFilters(filters) {
+		return files
+	}
+	filtered := make([]gin.H, 0, len(files))
+	for _, entry := range files {
+		if matchesAuthFileFilters(entry, filters) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) writeAuthFilesListResponse(c *gin.Context, files []gin.H) {
+	sortBy, sortOrder, err := parseListSort(c, "name", "asc", allowedAuthFileSortFields)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		diff := compareAuthFileEntries(files[i], files[j], sortBy)
+		if diff == 0 {
+			diff = compareAuthFileEntries(files[i], files[j], "name")
+		}
+		if diff == 0 {
+			diff = compareStringsFold(listValueAsString(files[i], "id"), listValueAsString(files[j], "id"))
+		}
+		if sortOrder == "desc" {
+			return diff > 0
+		}
+		return diff < 0
+	})
+
+	pagePaged, pageInfo, err := parseListPageInfo(c, files, sortBy, sortOrder)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	paged := pagePaged
+	pagination := &authFilesPagination{
+		Total:    len(files),
+		Offset:   0,
+		Limit:    0,
+		Returned: len(paged),
+		HasMore:  false,
+	}
+	if pageInfo.PageSize > 0 {
+		pagination.Offset = (pageInfo.Page - 1) * pageInfo.PageSize
+		pagination.Limit = pageInfo.PageSize
+		pagination.HasMore = pagination.Offset+pagination.Returned < pagination.Total
+	}
+
+	if strings.TrimSpace(c.Query("offset")) != "" || strings.TrimSpace(c.Query("limit")) != "" {
+		offset := parseAuthFilesListOffset(c.Query("offset"))
+		limit := parseAuthFilesListLimit(c.Query("limit"))
+		paged, pagination = paginateAuthFileEntries(files, offset, limit)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"files":      paged,
+		"total":      pageInfo.Total,
+		"page":       pageInfo.Page,
+		"page_size":  pageInfo.PageSize,
+		"pagination": pagination,
+		"sort_by":    pageInfo.SortBy,
+		"sort_order": pageInfo.SortOrder,
+	})
+}
+
+var allowedAuthFileSortFields = map[string]struct{}{
+	"account":          {},
+	"auth_index":       {},
+	"created_at":       {},
+	"disabled":         {},
+	"email":            {},
+	"expires_at":       {},
+	"last_refresh":     {},
+	"modtime":          {},
+	"name":             {},
+	"next_retry_after": {},
+	"prefix":           {},
+	"priority":         {},
+	"provider":         {},
+	"proxy_url":        {},
+	"quota_level":      {},
+	"quota_window":     {},
+	"size":             {},
+	"state":            {},
+	"status":           {},
+	"type":             {},
+	"updated_at":       {},
+}
+
+func hasAuthFilesFilters(filters authFilesFilters) bool {
+	return filters.Name != "" ||
+		filters.Provider != "" ||
+		filters.Status != "" ||
+		filters.State != "" ||
+		filters.Email != "" ||
+		filters.Prefix != "" ||
+		filters.ProxyURL != "" ||
+		filters.AuthIndex != "" ||
+		filters.QuotaLevel != "" ||
+		filters.QuotaChecked != nil ||
+		filters.RuntimeOnly != nil ||
+		filters.Disabled != nil ||
+		filters.Expired != nil ||
+		filters.HasExpiry != nil
+}
+
+func matchesAuthFileFilters(entry gin.H, filters authFilesFilters) bool {
+	if filters.Name != "" && !authFileStringContains(entry, "name", filters.Name) {
+		return false
+	}
+	if filters.Provider != "" &&
+		!authFileStringContains(entry, "provider", filters.Provider) &&
+		!authFileStringContains(entry, "type", filters.Provider) {
+		return false
+	}
+	if filters.Status != "" && !authFileStringContains(entry, "status", filters.Status) {
+		return false
+	}
+	if filters.State != "" && !authFileMatchesState(entry, filters.State) {
+		return false
+	}
+	if filters.Email != "" && !authFileStringContains(entry, "email", filters.Email) {
+		return false
+	}
+	if filters.Prefix != "" && !authFileStringContains(entry, "prefix", filters.Prefix) {
+		return false
+	}
+	if filters.ProxyURL != "" && !authFileStringContains(entry, "proxy_url", filters.ProxyURL) {
+		return false
+	}
+	if filters.AuthIndex != "" && !authFileStringContains(entry, "auth_index", filters.AuthIndex) {
+		return false
+	}
+	if filters.QuotaLevel != "" && normalizeAuthFilesQuotaLevel(authFileStringValue(entry, "quota_level")) != filters.QuotaLevel {
+		return false
+	}
+	if filters.QuotaChecked != nil && authFileBoolValue(entry, "quota_checked") != *filters.QuotaChecked {
+		return false
+	}
+	if filters.RuntimeOnly != nil && authFileBoolValue(entry, "runtime_only") != *filters.RuntimeOnly {
+		return false
+	}
+	if filters.Disabled != nil && authFileBoolValue(entry, "disabled") != *filters.Disabled {
+		return false
+	}
+	hasExpiry := !authFileTimeValue(entry, "expires_at").IsZero()
+	if filters.HasExpiry != nil && hasExpiry != *filters.HasExpiry {
+		return false
+	}
+	if filters.Expired != nil {
+		expired := authFileIsExpired(entry, time.Now().UTC())
+		if expired != *filters.Expired {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeAuthFilesFilterValue(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+func normalizeAuthFilesStateFilterValue(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "all", "全部":
+		return ""
+	case "disabled", "disable", "forbidden", "banned", "禁用", "禁止":
+		return "disabled"
+	case "normal", "active", "enabled", "正常":
+		return "normal"
+	default:
+		return normalizeAuthFilesFilterValue(raw)
+	}
+}
+
+func normalizeAuthFilesQuotaLevel(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "unchecked", "unknown", "unchecked_quota", "未检查":
+		return "unchecked"
+	case "low", "低":
+		return "low"
+	case "medium", "中", "mid":
+		return "medium"
+	case "high", "高":
+		return "high"
+	case "full", "满":
+		return "full"
+	default:
+		return normalizeAuthFilesFilterValue(raw)
+	}
+}
+
+func authFileMatchesState(entry gin.H, state string) bool {
+	switch normalizeAuthFilesStateFilterValue(state) {
+	case "":
+		return true
+	case "disabled":
+		return authFileBoolValue(entry, "disabled")
+	case "normal":
+		return !authFileBoolValue(entry, "disabled")
+	default:
+		return authFileStringContains(entry, "state", normalizeAuthFilesFilterValue(state))
+	}
+}
+
+func authFileStringContains(entry gin.H, key, needle string) bool {
+	if needle == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(authFileStringValue(entry, key)), needle)
+}
+
+func parseAuthFilesListBoolPtr(raw string) *bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return nil
+	case "1", "true", "yes", "on":
+		value := true
+		return &value
+	case "0", "false", "no", "off":
+		value := false
+		return &value
+	default:
+		return nil
+	}
+}
+
+func sortAuthFileEntries(files []gin.H, sortByRaw, sortOrderRaw string) {
+	sortBy := normalizeAuthFileSortBy(sortByRaw)
+	desc := normalizeAuthFileSortOrder(sortOrderRaw)
+	sort.SliceStable(files, func(i, j int) bool {
+		cmp := compareAuthFileEntries(files[i], files[j], sortBy)
+		if cmp == 0 {
+			cmp = compareAuthFileEntries(files[i], files[j], "name")
+		}
+		if desc {
+			return cmp > 0
+		}
+		return cmp < 0
+	})
+}
+
+func normalizeAuthFileSortBy(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "name":
+		return "name"
+	case "provider", "type":
+		return "provider"
+	case "prefix":
+		return "prefix"
+	case "proxy", "proxy_url":
+		return "proxy_url"
+	case "priority":
+		return "priority"
+	case "status":
+		return "status"
+	case "state":
+		return "state"
+	case "disabled":
+		return "disabled"
+	case "account":
+		return "account"
+	case "email":
+		return "email"
+	case "auth_index", "index":
+		return "auth_index"
+	case "updated", "updated_at", "modtime", "modified":
+		return "updated_at"
+	case "created", "created_at":
+		return "created_at"
+	case "last_refresh", "last_refreshed", "refreshed_at":
+		return "last_refresh"
+	case "next_retry_after", "retry_after":
+		return "next_retry_after"
+	case "expires_at", "expiry", "expired_at":
+		return "expires_at"
+	case "quota_level", "quota_status":
+		return "quota_level"
+	case "quota_window":
+		return "quota_window"
+	case "size":
+		return "size"
+	default:
+		return "name"
+	}
+}
+
+func normalizeAuthFileSortOrder(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "desc", "descending", "-1":
+		return true
+	default:
+		return false
+	}
+}
+
+func compareAuthFileEntries(left, right gin.H, sortBy string) int {
+	switch sortBy {
+	case "account":
+		return compareStrings(authFileStringValue(left, "account"), authFileStringValue(right, "account"))
+	case "priority", "auth_index":
+		return compareInt64(authFileIntValue(left, sortBy), authFileIntValue(right, sortBy))
+	case "disabled":
+		return compareBool(authFileBoolValue(left, "disabled"), authFileBoolValue(right, "disabled"))
+	case "updated_at":
+		return compareTime(authFileTimeValue(left, "updated_at", "modtime"), authFileTimeValue(right, "updated_at", "modtime"))
+	case "created_at":
+		return compareTime(authFileTimeValue(left, "created_at"), authFileTimeValue(right, "created_at"))
+	case "last_refresh":
+		return compareTime(authFileTimeValue(left, "last_refresh"), authFileTimeValue(right, "last_refresh"))
+	case "next_retry_after":
+		return compareTime(authFileTimeValue(left, "next_retry_after"), authFileTimeValue(right, "next_retry_after"))
+	case "expires_at":
+		return compareTime(authFileTimeValue(left, "expires_at"), authFileTimeValue(right, "expires_at"))
+	case "quota_window":
+		return compareStrings(authFileStringValue(left, "quota_window"), authFileStringValue(right, "quota_window"))
+	case "size":
+		return compareInt64(authFileIntValue(left, "size"), authFileIntValue(right, "size"))
+	default:
+		return compareStrings(authFileStringValue(left, sortBy), authFileStringValue(right, sortBy))
+	}
+}
+
+func authFileStringValue(entry gin.H, key string) string {
+	value, ok := entry[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return strings.TrimSpace(fmt.Sprint(typed))
+	}
+}
+
+func authFileBoolValue(entry gin.H, key string) bool {
+	value, ok := entry[key]
+	if !ok || value == nil {
+		return false
+	}
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return strings.EqualFold(strings.TrimSpace(fmt.Sprint(typed)), "true")
+	}
+}
+
+func authFileIntValue(entry gin.H, key string) int64 {
+	value, ok := entry[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int8:
+		return int64(typed)
+	case int16:
+		return int64(typed)
+	case int32:
+		return int64(typed)
+	case int64:
+		return typed
+	case float32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed
+		}
+	case string:
+		if parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64); err == nil {
+			return parsed
+		}
+	}
+	return 0
+}
+
+func authFileTimeValue(entry gin.H, keys ...string) time.Time {
+	for _, key := range keys {
+		value, ok := entry[key]
+		if !ok || value == nil {
+			continue
+		}
+		switch typed := value.(type) {
+		case time.Time:
+			return typed
+		case int64:
+			return time.Unix(typed, 0).UTC()
+		case int:
+			return time.Unix(int64(typed), 0).UTC()
+		case float64:
+			unix := int64(typed)
+			if typed > 1e12 {
+				return time.UnixMilli(unix).UTC()
+			}
+			return time.Unix(unix, 0).UTC()
+		case string:
+			trimmed := strings.TrimSpace(typed)
+			if trimmed == "" {
+				continue
+			}
+			if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+				return parsed
+			}
+			if parsed, err := time.Parse(time.RFC3339Nano, trimmed); err == nil {
+				return parsed
+			}
+			if unix, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+				if unix > 1e12 {
+					return time.UnixMilli(unix).UTC()
+				}
+				return time.Unix(unix, 0).UTC()
+			}
+		}
+	}
+	return time.Time{}
+}
+
+func compareStrings(left, right string) int {
+	left = strings.ToLower(strings.TrimSpace(left))
+	right = strings.ToLower(strings.TrimSpace(right))
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareBool(left, right bool) int {
+	switch {
+	case left == right:
+		return 0
+	case left:
+		return 1
+	default:
+		return -1
+	}
+}
+
+func compareInt64(left, right int64) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func compareTime(left, right time.Time) int {
+	switch {
+	case left.Before(right):
+		return -1
+	case left.After(right):
+		return 1
+	default:
+		return 0
+	}
+}
+
+func authFileIsExpired(entry gin.H, now time.Time) bool {
+	expiresAt := authFileTimeValue(entry, "expires_at")
+	if expiresAt.IsZero() {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return !expiresAt.After(now)
 }
 
 // GetAuthFileModels returns the models supported by a specific auth file
@@ -324,7 +870,7 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 }
 
 // List auth files from disk when the auth manager is unavailable.
-func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
+func (h *Handler) listAuthFilesFromDisk(c *gin.Context, filters authFilesFilters) {
 	entries, err := os.ReadDir(h.cfg.AuthDir)
 	if err != nil {
 		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to read auth dir: %v", err)})
@@ -350,14 +896,28 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 				prefixValue := normalizeAuthPrefixMetadata(gjson.GetBytes(data, "prefix").String())
 				proxyURLValue := strings.TrimSpace(gjson.GetBytes(data, "proxy_url").String())
 				disabledValue := gjson.GetBytes(data, "disabled").Bool()
+				expiresAtValue := parseAuthFileJSONTimeValue(
+					gjson.GetBytes(data, "expires_at"),
+					gjson.GetBytes(data, "expired"),
+					gjson.GetBytes(data, "expire"),
+					gjson.GetBytes(data, "expires"),
+					gjson.GetBytes(data, "expiry"),
+				)
 				fileData["type"] = typeValue
+				fileData["provider"] = typeValue
 				fileData["email"] = emailValue
 				fileData["disabled"] = disabledValue
+				fileData["state"] = authFileStateValue(disabledValue)
+				fileData["quota_checked"] = false
+				fileData["quota_level"] = "unchecked"
 				if disabledValue {
 					fileData["status"] = coreauth.StatusDisabled
 					fileData["status_message"] = managementDisabledMsg
 				} else {
 					fileData["status"] = coreauth.StatusActive
+				}
+				if !expiresAtValue.IsZero() {
+					fileData["expires_at"] = expiresAtValue
 				}
 				if prefixValue != "" {
 					fileData["prefix"] = prefixValue
@@ -378,89 +938,51 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			files = append(files, fileData)
 		}
 	}
+	files = filterAuthFileEntries(files, filters)
 	h.writeAuthFilesListResponse(c, files)
 }
 
-func (h *Handler) writeAuthFilesListResponse(c *gin.Context, files []gin.H) {
-	sortBy, sortOrder, err := parseListSort(c, "name", "asc", allowedAuthFileSortFields)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+func parseAuthFilesListOffset(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value < 0 {
+		return 0
 	}
-
-	sort.Slice(files, func(i, j int) bool {
-		diff := compareAuthFileEntries(files[i], files[j], sortBy)
-		if diff == 0 {
-			diff = compareAuthFileEntries(files[i], files[j], "name")
-		}
-		if diff == 0 {
-			diff = compareStringsFold(listValueAsString(files[i], "id"), listValueAsString(files[j], "id"))
-		}
-		if sortOrder == "desc" {
-			return diff > 0
-		}
-		return diff < 0
-	})
-
-	paged, pageInfo, err := parseListPageInfo(c, files, sortBy, sortOrder)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"files":      paged,
-		"total":      pageInfo.Total,
-		"page":       pageInfo.Page,
-		"page_size":  pageInfo.PageSize,
-		"sort_by":    pageInfo.SortBy,
-		"sort_order": pageInfo.SortOrder,
-	})
+	return value
 }
 
-var allowedAuthFileSortFields = map[string]struct{}{
-	"account":      {},
-	"auth_index":   {},
-	"email":        {},
-	"last_refresh": {},
-	"modtime":      {},
-	"name":         {},
-	"priority":     {},
-	"provider":     {},
-	"quota_window": {},
-	"size":         {},
-	"status":       {},
-	"type":         {},
-	"updated_at":   {},
+func parseAuthFilesListLimit(raw string) int {
+	value, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return 0
+	}
+	return value
 }
 
-func compareAuthFileEntries(left, right gin.H, sortBy string) int {
-	switch sortBy {
-	case "account":
-		return compareStringsFold(listValueAsString(left, "account"), listValueAsString(right, "account"))
-	case "auth_index":
-		return compareStringsFold(listValueAsString(left, "auth_index"), listValueAsString(right, "auth_index"))
-	case "email":
-		return compareStringsFold(listValueAsString(left, "email"), listValueAsString(right, "email"))
-	case "last_refresh":
-		return compareTimes(listValueAsTime(left, "last_refresh"), listValueAsTime(right, "last_refresh"))
-	case "modtime", "updated_at":
-		return compareTimes(listValueAsTime(left, "updated_at", "modtime"), listValueAsTime(right, "updated_at", "modtime"))
-	case "priority":
-		return compareInts(listValueAsInt(left, "priority"), listValueAsInt(right, "priority"))
-	case "provider", "type":
-		return compareStringsFold(listValueAsString(left, "provider", "type"), listValueAsString(right, "provider", "type"))
-	case "quota_window":
-		return compareStringsFold(listValueAsString(left, "quota_window"), listValueAsString(right, "quota_window"))
-	case "size":
-		return compareInt64s(listValueAsInt64(left, "size"), listValueAsInt64(right, "size"))
-	case "status":
-		return compareStringsFold(listValueAsString(left, "status"), listValueAsString(right, "status"))
-	case "name":
-		fallthrough
-	default:
-		return compareStringsFold(listValueAsString(left, "name"), listValueAsString(right, "name"))
+func paginateAuthFileEntries(files []gin.H, offset, limit int) ([]gin.H, *authFilesPagination) {
+	total := len(files)
+	if offset < 0 {
+		offset = 0
 	}
+	if offset > total {
+		offset = total
+	}
+	end := total
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+	pagination := &authFilesPagination{
+		Total:    total,
+		Offset:   offset,
+		Limit:    limit,
+		Returned: end - offset,
+		HasMore:  end < total,
+	}
+	if offset == 0 && end == total {
+		return files, pagination
+	}
+	out := make([]gin.H, end-offset)
+	copy(out, files[offset:end])
+	return out, pagination
 }
 
 func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
@@ -494,6 +1016,20 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		"runtime_only":   runtimeOnly,
 		"source":         "memory",
 		"size":           int64(0),
+		"state":          authFileStateValue(auth.Disabled),
+	}
+	quotaSummary := buildAuthQuotaSummary(auth)
+	entry["quota_checked"] = quotaSummary.Checked
+	entry["quota_level"] = quotaSummary.Level
+	entry["quota_exceeded"] = quotaSummary.Exceeded
+	if quotaSummary.Reason != "" {
+		entry["quota_reason"] = quotaSummary.Reason
+	}
+	if !quotaSummary.NextRecoverAt.IsZero() {
+		entry["next_recover_at"] = quotaSummary.NextRecoverAt
+	}
+	if quotaSummary.BackoffLevel > 0 {
+		entry["quota_backoff_level"] = quotaSummary.BackoffLevel
 	}
 	if prefix := strings.TrimSpace(auth.Prefix); prefix != "" {
 		entry["prefix"] = prefix
@@ -535,6 +1071,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	}
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
+	}
+	if expiresAt, ok := auth.ExpirationTime(); ok && !expiresAt.IsZero() {
+		entry["expires_at"] = expiresAt
 	}
 	nextRetry := auth.NextRetryAfter
 	if nextRetry.IsZero() {
@@ -596,6 +1135,216 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 		}
 	}
 	return entry
+}
+
+type authQuotaSummary struct {
+	Checked       bool
+	Level         string
+	Exceeded      bool
+	Reason        string
+	NextRecoverAt time.Time
+	BackoffLevel  int
+}
+
+func buildAuthQuotaSummary(auth *coreauth.Auth) authQuotaSummary {
+	summary := authQuotaSummary{Level: "unchecked"}
+	if auth == nil {
+		return summary
+	}
+	quota, hasQuota := bestAuthQuotaState(auth)
+	nextRetry := auth.NextRetryAfter
+	if nextRetry.IsZero() {
+		if earliest, ok := earliestModelRetryAfter(auth); ok {
+			nextRetry = earliest
+		}
+	}
+	summary.Checked = hasQuota || !nextRetry.IsZero() || hasPersistedRuntimeSnapshot(auth)
+	if !summary.Checked {
+		return summary
+	}
+	summary.Level = "full"
+	summary.Exceeded = quota.Exceeded || auth.Unavailable
+	summary.Reason = strings.TrimSpace(quota.Reason)
+	summary.NextRecoverAt = quota.NextRecoverAt
+	summary.BackoffLevel = quota.BackoffLevel
+	if summary.Exceeded || !nextRetry.IsZero() || !summary.NextRecoverAt.IsZero() {
+		summary.Level = quotaAvailabilityLevel(summary.Reason, summary.BackoffLevel, firstNonZeroTime(summary.NextRecoverAt, nextRetry), time.Now().UTC())
+	}
+	return summary
+}
+
+func bestAuthQuotaState(auth *coreauth.Auth) (coreauth.QuotaState, bool) {
+	if auth == nil {
+		return coreauth.QuotaState{}, false
+	}
+	best := auth.Quota
+	hasBest := quotaStateHasData(best)
+	if global := resolveAuthModelState(auth, "_global"); global != nil && quotaStateHasData(global.Quota) {
+		if !hasBest || scoreQuotaState(global.Quota) >= scoreQuotaState(best) {
+			best = global.Quota
+			hasBest = true
+		}
+	}
+	for _, state := range auth.ModelStates {
+		if state == nil || !quotaStateHasData(state.Quota) {
+			continue
+		}
+		if !hasBest || scoreQuotaState(state.Quota) > scoreQuotaState(best) {
+			best = state.Quota
+			hasBest = true
+		}
+	}
+	return best, hasBest
+}
+
+func quotaStateHasData(state coreauth.QuotaState) bool {
+	return state.Exceeded ||
+		strings.TrimSpace(state.Reason) != "" ||
+		!state.NextRecoverAt.IsZero() ||
+		state.BackoffLevel > 0
+}
+
+func scoreQuotaState(state coreauth.QuotaState) int {
+	score := 0
+	if state.Exceeded {
+		score += 8
+	}
+	if strings.TrimSpace(state.Reason) != "" {
+		score += 4
+	}
+	if !state.NextRecoverAt.IsZero() {
+		score += 2
+	}
+	score += state.BackoffLevel
+	return score
+}
+
+func quotaAvailabilityLevel(reason string, backoffLevel int, recoverAt, now time.Time) string {
+	if !recoverAt.IsZero() && now.IsZero() {
+		now = time.Now().UTC()
+	}
+	remaining := time.Duration(0)
+	if !recoverAt.IsZero() {
+		remaining = recoverAt.Sub(now)
+	}
+	reason = strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case reason == "quota_weekly" || backoffLevel >= 3 || remaining >= 24*time.Hour:
+		return "low"
+	case backoffLevel >= 2 || remaining >= 6*time.Hour:
+		return "medium"
+	default:
+		return "high"
+	}
+}
+
+func hasPersistedRuntimeSnapshot(auth *coreauth.Auth) bool {
+	if auth == nil || auth.Metadata == nil {
+		return false
+	}
+	raw, ok := auth.Metadata[coreauth.PersistedRuntimeStateMetadataKey]
+	if !ok || raw == nil {
+		return false
+	}
+	root, ok := raw.(map[string]any)
+	if !ok {
+		return false
+	}
+	auths, ok := root["auths"].(map[string]any)
+	if !ok {
+		return false
+	}
+	_, exists := auths[strings.TrimSpace(auth.ID)]
+	return exists
+}
+
+func authFileStateValue(disabled bool) string {
+	if disabled {
+		return "disabled"
+	}
+	return "normal"
+}
+
+func parseAuthFileJSONTimeValue(values ...gjson.Result) time.Time {
+	for _, value := range values {
+		if !value.Exists() {
+			continue
+		}
+		if parsed, ok := parseAnyTimeValue(value.Value()); ok {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func parseAnyTimeValue(value any) (time.Time, bool) {
+	switch typed := value.(type) {
+	case time.Time:
+		if typed.IsZero() {
+			return time.Time{}, false
+		}
+		return typed.UTC(), true
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return time.Time{}, false
+		}
+		layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"}
+		for _, layout := range layouts {
+			if parsed, err := time.Parse(layout, trimmed); err == nil {
+				return parsed.UTC(), true
+			}
+		}
+		if unix, err := strconv.ParseInt(trimmed, 10, 64); err == nil && unix > 0 {
+			if unix > 1e12 {
+				return time.UnixMilli(unix).UTC(), true
+			}
+			return time.Unix(unix, 0).UTC(), true
+		}
+	case float64:
+		if typed <= 0 {
+			return time.Time{}, false
+		}
+		unix := int64(typed)
+		if typed > 1e12 {
+			return time.UnixMilli(unix).UTC(), true
+		}
+		return time.Unix(unix, 0).UTC(), true
+	case int64:
+		if typed <= 0 {
+			return time.Time{}, false
+		}
+		if typed > 1e12 {
+			return time.UnixMilli(typed).UTC(), true
+		}
+		return time.Unix(typed, 0).UTC(), true
+	case int:
+		if typed <= 0 {
+			return time.Time{}, false
+		}
+		return time.Unix(int64(typed), 0).UTC(), true
+	case json.Number:
+		if unix, err := typed.Int64(); err == nil && unix > 0 {
+			if unix > 1e12 {
+				return time.UnixMilli(unix).UTC(), true
+			}
+			return time.Unix(unix, 0).UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func firstNonZeroTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Time{}
+}
+
+func strPtr(value string) *string {
+	return &value
 }
 
 func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
@@ -1690,37 +2439,6 @@ type patchAuthFilesExcludedModelsBatchResponse struct {
 	Results   []patchAuthFilesExcludedModelsBatchResult `json:"results"`
 }
 
-type patchAuthFilesProxyURLBatchRequest struct {
-	Names       []string `json:"names"`
-	ProxyURL    *string  `json:"proxy_url"`
-	DryRun      bool     `json:"dry_run"`
-	StopOnError bool     `json:"stop_on_error"`
-}
-
-type patchAuthFilesProxyURLBatchSummary struct {
-	Total     int `json:"total"`
-	Updated   int `json:"updated"`
-	Unchanged int `json:"unchanged"`
-	Failed    int `json:"failed"`
-	Skipped   int `json:"skipped"`
-}
-
-type patchAuthFilesProxyURLBatchResult struct {
-	Name    string `json:"name"`
-	Status  string `json:"status"`
-	Changed bool   `json:"changed"`
-	Before  string `json:"before"`
-	After   string `json:"after"`
-	Error   string `json:"error,omitempty"`
-}
-
-type patchAuthFilesProxyURLBatchResponse struct {
-	Status  string                              `json:"status"`
-	DryRun  bool                                `json:"dry_run"`
-	Summary patchAuthFilesProxyURLBatchSummary  `json:"summary"`
-	Results []patchAuthFilesProxyURLBatchResult `json:"results"`
-}
-
 // PatchAuthFilesExcludedModelsBatch batch-updates excluded_models in selected auth JSON files.
 // PATCH /v0/management/auth-files/excluded-models/batch
 func (h *Handler) PatchAuthFilesExcludedModelsBatch(c *gin.Context) {
@@ -1879,150 +2597,6 @@ func (h *Handler) applyExcludedModelsPatchToAuthFile(ctx context.Context, name, 
 	return before, after, changed, nil
 }
 
-// PatchAuthFilesProxyURLBatch batch-updates proxy_url in selected auth JSON files.
-// PATCH /v0/management/auth-files/proxy-url/batch
-func (h *Handler) PatchAuthFilesProxyURLBatch(c *gin.Context) {
-	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "auth directory is not configured"})
-		return
-	}
-
-	var req patchAuthFilesProxyURLBatchRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
-	}
-
-	names := normalizeBatchAuthFileNames(req.Names)
-	if len(names) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "names is required"})
-		return
-	}
-	if len(names) > maxBatchAuthFileUpdates {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many names, max is %d", maxBatchAuthFileUpdates)})
-		return
-	}
-	if req.ProxyURL == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "proxy_url is required"})
-		return
-	}
-
-	targetProxyURL := strings.TrimSpace(*req.ProxyURL)
-	resp := patchAuthFilesProxyURLBatchResponse{
-		DryRun: req.DryRun,
-		Summary: patchAuthFilesProxyURLBatchSummary{
-			Total: len(names),
-		},
-		Results: make([]patchAuthFilesProxyURLBatchResult, 0, len(names)),
-	}
-
-	ctx := c.Request.Context()
-	stopped := false
-	for _, name := range names {
-		result := patchAuthFilesProxyURLBatchResult{Name: name}
-		if stopped {
-			result.Status = "skipped"
-			resp.Summary.Skipped++
-			resp.Results = append(resp.Results, result)
-			continue
-		}
-
-		before, after, changed, err := h.applyProxyURLPatchToAuthFile(ctx, name, targetProxyURL, req.DryRun)
-		result.Before = before
-		result.After = after
-		result.Changed = changed
-		if err != nil {
-			result.Status = "failed"
-			result.Error = err.Error()
-			resp.Summary.Failed++
-			if req.StopOnError {
-				stopped = true
-			}
-			resp.Results = append(resp.Results, result)
-			continue
-		}
-
-		if changed {
-			if req.DryRun {
-				result.Status = "would_update"
-			} else {
-				result.Status = "updated"
-			}
-			resp.Summary.Updated++
-		} else {
-			result.Status = "unchanged"
-			resp.Summary.Unchanged++
-		}
-		resp.Results = append(resp.Results, result)
-	}
-
-	if req.DryRun {
-		resp.Status = "dry_run"
-	} else if resp.Summary.Failed > 0 {
-		resp.Status = "partial"
-	} else {
-		resp.Status = "ok"
-	}
-
-	c.JSON(http.StatusOK, resp)
-}
-
-func (h *Handler) applyProxyURLPatchToAuthFile(ctx context.Context, name, proxyURL string, dryRun bool) (string, string, bool, error) {
-	if h == nil || h.cfg == nil || strings.TrimSpace(h.cfg.AuthDir) == "" {
-		return "", "", false, fmt.Errorf("auth directory is not configured")
-	}
-	if err := validateAuthFileName(name); err != nil {
-		return "", "", false, err
-	}
-
-	full := filepath.Join(h.cfg.AuthDir, filepath.Base(name))
-	if !filepath.IsAbs(full) {
-		if abs, errAbs := filepath.Abs(full); errAbs == nil {
-			full = abs
-		}
-	}
-
-	data, errRead := os.ReadFile(full)
-	if errRead != nil {
-		if os.IsNotExist(errRead) {
-			return "", "", false, fmt.Errorf("file not found")
-		}
-		return "", "", false, fmt.Errorf("failed to read file: %w", errRead)
-	}
-
-	metadata := make(map[string]any)
-	if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal != nil {
-		return "", "", false, fmt.Errorf("invalid auth file format: %w", errUnmarshal)
-	}
-
-	before := strings.TrimSpace(readStringFromMetadata(metadata, "proxy_url", "proxy-url"))
-	after := strings.TrimSpace(proxyURL)
-	changed := before != after
-	if !changed || dryRun {
-		return before, after, changed, nil
-	}
-
-	if after == "" {
-		delete(metadata, "proxy_url")
-		delete(metadata, "proxy-url")
-	} else {
-		metadata["proxy_url"] = after
-		delete(metadata, "proxy-url")
-	}
-
-	newData, errMarshal := json.MarshalIndent(metadata, "", "  ")
-	if errMarshal != nil {
-		return before, after, changed, fmt.Errorf("failed to serialize file: %w", errMarshal)
-	}
-	if errWrite := os.WriteFile(full, newData, 0o600); errWrite != nil {
-		return before, after, changed, fmt.Errorf("failed to write file: %w", errWrite)
-	}
-	if errReload := h.reloadAuthFile(ctx, full, newData); errReload != nil {
-		return before, after, changed, fmt.Errorf("failed to reload auth file: %w", errReload)
-	}
-	return before, after, changed, nil
-}
-
 func normalizeBatchAuthFileNames(names []string) []string {
 	if len(names) == 0 {
 		return nil
@@ -2058,6 +2632,47 @@ func readStringFromMetadata(metadata map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+type patchAuthFileEditableFieldsInput struct {
+	Prefix   *string
+	ProxyURL *string
+	Headers  map[string]string
+	Priority *int
+	Note     *string
+}
+
+type patchAuthFilesFieldsBatchRequest struct {
+	Names       []string          `json:"names"`
+	Prefix      *string           `json:"prefix"`
+	ProxyURL    *string           `json:"proxy_url"`
+	Headers     map[string]string `json:"headers"`
+	Priority    *int              `json:"priority"`
+	Note        *string           `json:"note"`
+	DryRun      bool              `json:"dry_run"`
+	StopOnError bool              `json:"stop_on_error"`
+}
+
+type patchAuthFilesFieldsBatchSummary struct {
+	Total     int `json:"total"`
+	Updated   int `json:"updated"`
+	Unchanged int `json:"unchanged"`
+	Failed    int `json:"failed"`
+	Skipped   int `json:"skipped"`
+}
+
+type patchAuthFilesFieldsBatchResult struct {
+	Name    string `json:"name"`
+	Status  string `json:"status"`
+	Changed bool   `json:"changed"`
+	Error   string `json:"error,omitempty"`
+}
+
+type patchAuthFilesFieldsBatchResponse struct {
+	Status  string                            `json:"status"`
+	DryRun  bool                              `json:"dry_run"`
+	Summary patchAuthFilesFieldsBatchSummary  `json:"summary"`
+	Results []patchAuthFilesFieldsBatchResult `json:"results"`
 }
 
 func validateAuthFileName(name string) error {
@@ -2229,79 +2844,55 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok", "disabled": *req.Disabled})
 }
 
-// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
-func (h *Handler) PatchAuthFileFields(c *gin.Context) {
-	if h.authManager == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
-		return
+func hasEditableAuthFieldPatch(input patchAuthFileEditableFieldsInput) bool {
+	return input.Prefix != nil || input.ProxyURL != nil || len(input.Headers) > 0 || input.Priority != nil || input.Note != nil
+}
+
+func applyEditableAuthFieldPatch(record *coreauth.Auth, input patchAuthFileEditableFieldsInput) (bool, error) {
+	if record == nil {
+		return false, fmt.Errorf("auth file not found")
+	}
+	if !hasEditableAuthFieldPatch(input) {
+		return false, nil
 	}
 
-	var req struct {
-		Name     string            `json:"name"`
-		Prefix   *string           `json:"prefix"`
-		ProxyURL *string           `json:"proxy_url"`
-		Headers  map[string]string `json:"headers"`
-		Priority *int              `json:"priority"`
-		Note     *string           `json:"note"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
-		return
+	if record.Metadata == nil {
+		record.Metadata = make(map[string]any)
 	}
 
-	name := strings.TrimSpace(req.Name)
-	if name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
-		return
-	}
-
-	ctx := c.Request.Context()
-
-	targetAuth := findAuthByNameOrID(h.authManager, name)
-	if targetAuth == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "auth file not found"})
-		return
-	}
-
-	path, metadata, err := h.loadAuthFileMetadata(targetAuth)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to load auth metadata: %v", err)})
-		return
-	}
-	record := targetAuth.Clone()
-	record.Metadata = metadata
 	changed := false
-	if req.Prefix != nil {
-		prefixValue, errPrefix := normalizeAuthPrefixInput(*req.Prefix)
+	if input.Prefix != nil {
+		prefixValue, errPrefix := normalizeAuthPrefixInput(*input.Prefix)
 		if errPrefix != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errPrefix.Error()})
-			return
+			return false, errPrefix
 		}
-		if record.Metadata == nil {
-			record.Metadata = make(map[string]any)
+		currentPrefix, _ := record.Metadata["prefix"].(string)
+		currentPrefix = strings.TrimSpace(currentPrefix)
+		if strings.TrimSpace(record.Prefix) != prefixValue || currentPrefix != prefixValue {
+			record.Prefix = prefixValue
+			if prefixValue == "" {
+				delete(record.Metadata, "prefix")
+			} else {
+				record.Metadata["prefix"] = prefixValue
+			}
+			changed = true
 		}
-		record.Prefix = prefixValue
-		if prefixValue == "" {
-			delete(record.Metadata, "prefix")
-		} else {
-			record.Metadata["prefix"] = prefixValue
-		}
-		changed = true
 	}
-	if req.ProxyURL != nil {
-		proxyURL := strings.TrimSpace(*req.ProxyURL)
-		if record.Metadata == nil {
-			record.Metadata = make(map[string]any)
+	if input.ProxyURL != nil {
+		proxyURL := strings.TrimSpace(*input.ProxyURL)
+		currentProxyURL, _ := record.Metadata["proxy_url"].(string)
+		currentProxyURL = strings.TrimSpace(currentProxyURL)
+		if strings.TrimSpace(record.ProxyURL) != proxyURL || currentProxyURL != proxyURL {
+			record.ProxyURL = proxyURL
+			if proxyURL == "" {
+				delete(record.Metadata, "proxy_url")
+			} else {
+				record.Metadata["proxy_url"] = proxyURL
+			}
+			changed = true
 		}
-		record.ProxyURL = proxyURL
-		if proxyURL == "" {
-			delete(record.Metadata, "proxy_url")
-		} else {
-			record.Metadata["proxy_url"] = proxyURL
-		}
-		changed = true
 	}
-	if len(req.Headers) > 0 {
+	if len(input.Headers) > 0 {
 		existingHeaders := coreauth.ExtractCustomHeadersFromMetadata(record.Metadata)
 		nextHeaders := make(map[string]string, len(existingHeaders))
 		for k, v := range existingHeaders {
@@ -2309,7 +2900,7 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 		headerChanged := false
 
-		for key, value := range req.Headers {
+		for key, value := range input.Headers {
 			name := strings.TrimSpace(key)
 			if name == "" {
 				continue
@@ -2342,14 +2933,11 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 		}
 
 		if headerChanged {
-			if record.Metadata == nil {
-				record.Metadata = make(map[string]any)
-			}
 			if record.Attributes == nil {
 				record.Attributes = make(map[string]string)
 			}
 
-			for key, value := range req.Headers {
+			for key, value := range input.Headers {
 				name := strings.TrimSpace(key)
 				if name == "" {
 					continue
@@ -2377,41 +2965,58 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 			changed = true
 		}
 	}
-	if req.Priority != nil || req.Note != nil {
-		if record.Metadata == nil {
-			record.Metadata = make(map[string]any)
-		}
+	if input.Priority != nil || input.Note != nil {
 		if record.Attributes == nil {
 			record.Attributes = make(map[string]string)
 		}
 
-		if req.Priority != nil {
-			if *req.Priority == 0 {
-				delete(record.Metadata, "priority")
-				delete(record.Attributes, "priority")
-			} else {
-				record.Metadata["priority"] = *req.Priority
-				record.Attributes["priority"] = strconv.Itoa(*req.Priority)
+		if input.Priority != nil {
+			currentPriority, hasCurrentPriority := authPriorityValue(record)
+			nextPriority := *input.Priority
+			if nextPriority == 0 {
+				if hasCurrentPriority {
+					delete(record.Metadata, "priority")
+					delete(record.Attributes, "priority")
+					changed = true
+				}
+			} else if !hasCurrentPriority || currentPriority != nextPriority || strings.TrimSpace(record.Attributes["priority"]) != strconv.Itoa(nextPriority) {
+				record.Metadata["priority"] = nextPriority
+				record.Attributes["priority"] = strconv.Itoa(nextPriority)
+				changed = true
 			}
 		}
-		if req.Note != nil {
-			trimmedNote := strings.TrimSpace(*req.Note)
+		if input.Note != nil {
+			trimmedNote := strings.TrimSpace(*input.Note)
 			if trimmedNote == "" {
-				delete(record.Metadata, "note")
-				delete(record.Attributes, "note")
+				_, hasAttrNote := record.Attributes["note"]
+				_, hasMetaNote := record.Metadata["note"]
+				if hasAttrNote || hasMetaNote {
+					delete(record.Metadata, "note")
+					delete(record.Attributes, "note")
+					changed = true
+				}
 			} else {
-				record.Metadata["note"] = trimmedNote
-				record.Attributes["note"] = trimmedNote
+				attrNote := strings.TrimSpace(record.Attributes["note"])
+				metaNote := ""
+				if rawNote, ok := record.Metadata["note"].(string); ok {
+					metaNote = strings.TrimSpace(rawNote)
+				}
+				if attrNote != trimmedNote || metaNote != trimmedNote {
+					record.Metadata["note"] = trimmedNote
+					record.Attributes["note"] = trimmedNote
+					changed = true
+				}
 			}
 		}
-		changed = true
 	}
 
-	if !changed {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
-		return
-	}
+	return changed, nil
+}
 
+func (h *Handler) persistPatchedAuthRecord(ctx context.Context, path string, record *coreauth.Auth) error {
+	if h == nil || record == nil {
+		return fmt.Errorf("auth file not found")
+	}
 	record.UpdatedAt = time.Now()
 	if path != "" {
 		if record.Attributes == nil {
@@ -2421,14 +3026,243 @@ func (h *Handler) PatchAuthFileFields(c *gin.Context) {
 	}
 	savedPath, err := h.saveTokenRecord(ctx, record)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to persist auth file: %v", err)})
-		return
+		return fmt.Errorf("failed to persist auth file: %w", err)
 	}
 	if savedPath == "" {
 		savedPath = path
 	}
+	if savedPath != "" {
+		payload, errMarshal := json.MarshalIndent(record.Metadata, "", "  ")
+		if errMarshal != nil {
+			return fmt.Errorf("failed to serialize auth file: %w", errMarshal)
+		}
+		if errWrite := os.WriteFile(savedPath, payload, 0o600); errWrite != nil {
+			return fmt.Errorf("failed to write auth file: %w", errWrite)
+		}
+	}
 	if err := h.reloadAuthFile(ctx, savedPath, nil); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to reload auth file: %v", err)})
+		return fmt.Errorf("failed to reload auth file: %w", err)
+	}
+	if h.authManager != nil {
+		if _, err := h.authManager.Update(ctx, record); err != nil {
+			return fmt.Errorf("failed to refresh auth record: %w", err)
+		}
+	}
+	return nil
+}
+
+func (h *Handler) editableAuthFieldInputForName(name string) (string, *coreauth.Auth, error) {
+	if h == nil || h.authManager == nil {
+		return "", nil, fmt.Errorf("core auth manager unavailable")
+	}
+	targetAuth := findAuthByNameOrID(h.authManager, name)
+	if targetAuth == nil {
+		return "", nil, fmt.Errorf("auth file not found")
+	}
+	path, metadata, err := h.loadAuthFileMetadata(targetAuth)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to load auth metadata: %w", err)
+	}
+	record := targetAuth.Clone()
+	record.Metadata = metadata
+	return path, record, nil
+}
+
+func (h *Handler) patchAuthFilesFieldsBatch(c *gin.Context, req patchAuthFilesFieldsBatchRequest) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	names := normalizeBatchAuthFileNames(req.Names)
+	if len(names) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "names is required"})
+		return
+	}
+	if len(names) > maxBatchAuthFileUpdates {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("too many names, max is %d", maxBatchAuthFileUpdates)})
+		return
+	}
+
+	input := patchAuthFileEditableFieldsInput{
+		Prefix:   req.Prefix,
+		ProxyURL: req.ProxyURL,
+		Headers:  req.Headers,
+		Priority: req.Priority,
+		Note:     req.Note,
+	}
+	if !hasEditableAuthFieldPatch(input) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	ctx := c.Request.Context()
+	resp := patchAuthFilesFieldsBatchResponse{
+		DryRun: req.DryRun,
+		Summary: patchAuthFilesFieldsBatchSummary{
+			Total: len(names),
+		},
+		Results: make([]patchAuthFilesFieldsBatchResult, 0, len(names)),
+	}
+
+	stopped := false
+	for _, name := range names {
+		result := patchAuthFilesFieldsBatchResult{Name: name}
+		if stopped {
+			result.Status = "skipped"
+			resp.Summary.Skipped++
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		path, record, err := h.editableAuthFieldInputForName(name)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			resp.Summary.Failed++
+			if req.StopOnError {
+				stopped = true
+			}
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		changed, err := applyEditableAuthFieldPatch(record, input)
+		if err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			resp.Summary.Failed++
+			if req.StopOnError {
+				stopped = true
+			}
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		result.Changed = changed
+		if !changed {
+			result.Status = "unchanged"
+			resp.Summary.Unchanged++
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+		if req.DryRun {
+			result.Status = "would_update"
+			resp.Summary.Updated++
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		if err := h.persistPatchedAuthRecord(ctx, path, record); err != nil {
+			result.Status = "failed"
+			result.Error = err.Error()
+			resp.Summary.Failed++
+			if req.StopOnError {
+				stopped = true
+			}
+			resp.Results = append(resp.Results, result)
+			continue
+		}
+
+		result.Status = "updated"
+		resp.Summary.Updated++
+		resp.Results = append(resp.Results, result)
+	}
+
+	if req.DryRun {
+		resp.Status = "dry_run"
+	} else if resp.Summary.Failed > 0 {
+		resp.Status = "partial"
+	} else {
+		resp.Status = "ok"
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// PatchAuthFilesFieldsBatch batch-updates editable fields (prefix, proxy_url, headers, priority, note).
+// PATCH /v0/management/auth-files/fields/batch
+func (h *Handler) PatchAuthFilesFieldsBatch(c *gin.Context) {
+	var req patchAuthFilesFieldsBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	h.patchAuthFilesFieldsBatch(c, req)
+}
+
+// PatchAuthFilesProxyURLBatch batch-updates proxy_url for multiple auth files.
+// PATCH /v0/management/auth-files/proxy-url/batch
+func (h *Handler) PatchAuthFilesProxyURLBatch(c *gin.Context) {
+	var req patchAuthFilesFieldsBatchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+	h.patchAuthFilesFieldsBatch(c, patchAuthFilesFieldsBatchRequest{
+		Names:       req.Names,
+		ProxyURL:    req.ProxyURL,
+		DryRun:      req.DryRun,
+		StopOnError: req.StopOnError,
+	})
+}
+
+// PatchAuthFileFields updates editable fields (prefix, proxy_url, headers, priority, note) of an auth file.
+func (h *Handler) PatchAuthFileFields(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		Name     string            `json:"name"`
+		Prefix   *string           `json:"prefix"`
+		ProxyURL *string           `json:"proxy_url"`
+		Headers  map[string]string `json:"headers"`
+		Priority *int              `json:"priority"`
+		Note     *string           `json:"note"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "name is required"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	path, record, err := h.editableAuthFieldInputForName(name)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			status = http.StatusNotFound
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
+	changed, err := applyEditableAuthFieldPatch(record, patchAuthFileEditableFieldsInput{
+		Prefix:   req.Prefix,
+		ProxyURL: req.ProxyURL,
+		Headers:  req.Headers,
+		Priority: req.Priority,
+		Note:     req.Note,
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if !changed {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no fields to update"})
+		return
+	}
+
+	if err := h.persistPatchedAuthRecord(ctx, path, record); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 

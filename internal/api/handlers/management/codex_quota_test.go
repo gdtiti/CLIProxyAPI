@@ -386,6 +386,130 @@ func TestCodexQuotaHandlers_SupportSortAndPagination(t *testing.T) {
 	}
 }
 
+func TestCodexQuotaHandlers_FilterDeletedAccountsFromPersistedViews(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	service, err := codexquota.NewService(authDir)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	codexquota.SetDefaultService(service)
+	t.Cleanup(func() { codexquota.SetDefaultService(nil) })
+
+	manager := coreauth.NewManager(nil, nil, service.Hook())
+	service.SetAuthManager(manager)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	currentAuth := &coreauth.Auth{
+		ID:       "codex-auth-current",
+		Provider: "codex",
+		FileName: "current.json",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"email": "current@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), currentAuth); errRegister != nil {
+		t.Fatalf("Register(current) error = %v", errRegister)
+	}
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      currentAuth.ID,
+		AuthIndex:   currentAuth.EnsureIndex(),
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			TotalTokens: 11,
+		},
+	})
+
+	staleAuth := &coreauth.Auth{
+		ID:       "codex-auth-stale",
+		Provider: "codex",
+		FileName: "stale.json",
+		Status:   coreauth.StatusActive,
+		Metadata: map[string]any{
+			"email": "stale@example.com",
+		},
+	}
+	service.HandleAuthRegistered(staleAuth)
+	service.ApplyUsage(coreusage.Record{
+		Provider:    "codex",
+		AuthID:      staleAuth.ID,
+		AuthIndex:   staleAuth.EnsureIndex(),
+		RequestedAt: time.Now().UTC(),
+		Detail: coreusage.Detail{
+			TotalTokens: 99,
+		},
+	})
+
+	router := gin.New()
+	router.GET("/v0/management/codex-auth-quota", handler.GetCodexAuthQuota)
+	router.GET("/v0/management/codex-auth-quota/:auth_index", handler.GetCodexAuthQuotaByIndex)
+	router.GET("/v0/management/codex-auth-events", handler.GetCodexAuthEvents)
+	router.GET("/v0/management/codex-auth-usage", handler.GetCodexAuthUsage)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("quota list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var quotaBody struct {
+		Accounts []codexquota.SnapshotView `json:"accounts"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &quotaBody); errDecode != nil {
+		t.Fatalf("quota list decode error = %v", errDecode)
+	}
+	if len(quotaBody.Accounts) != 1 || quotaBody.Accounts[0].AuthID != currentAuth.ID {
+		t.Fatalf("quota accounts = %+v, want only %q", quotaBody.Accounts, currentAuth.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-usage", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("usage list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var usageBody struct {
+		Usage []codexquota.UsageRollup `json:"usage"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &usageBody); errDecode != nil {
+		t.Fatalf("usage list decode error = %v", errDecode)
+	}
+	if len(usageBody.Usage) != 1 || usageBody.Usage[0].AuthID != currentAuth.ID {
+		t.Fatalf("usage rollups = %+v, want only %q", usageBody.Usage, currentAuth.ID)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-events", nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events list status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var eventBody struct {
+		Events []codexquota.Event `json:"events"`
+	}
+	if errDecode := json.Unmarshal(rec.Body.Bytes(), &eventBody); errDecode != nil {
+		t.Fatalf("events list decode error = %v", errDecode)
+	}
+	if len(eventBody.Events) == 0 {
+		t.Fatal("events list is empty, want current auth events")
+	}
+	for _, event := range eventBody.Events {
+		if event.AuthID != currentAuth.ID {
+			t.Fatalf("event auth_id = %q, want only %q", event.AuthID, currentAuth.ID)
+		}
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/v0/management/codex-auth-quota/"+staleAuth.EnsureIndex(), nil)
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("stale quota detail status = %d, want %d, body=%s", rec.Code, http.StatusNotFound, rec.Body.String())
+	}
+}
+
 func TestCodexQuotaHandlers_RejectInvalidSortBy(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

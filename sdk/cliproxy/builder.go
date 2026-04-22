@@ -230,7 +230,6 @@ func (b *Builder) Build() (*Service, error) {
 	codexquota.SetDefaultService(nil)
 	var quotaService *codexquota.Service
 	if b.cfg != nil && strings.TrimSpace(b.cfg.AuthDir) != "" {
-		var err error
 		quotaService, err = codexquota.NewService(b.cfg.AuthDir)
 		if err != nil {
 			return nil, fmt.Errorf("initialize codex quota service: %w", err)
@@ -276,6 +275,9 @@ func (b *Builder) Build() (*Service, error) {
 	coreManager.SetConfig(b.cfg)
 	coreManager.SetOAuthModelAlias(b.cfg.OAuthModelAlias)
 	if quotaService != nil {
+		if b.coreManager != nil {
+			coreManager.SetHook(coreauth.CombineHooks(coreManager.Hook(), quotaService.Hook()))
+		}
 		quotaService.SetAuthManager(coreManager)
 		quotaService.SyncAuths(coreManager.List())
 	}

@@ -248,7 +248,7 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthor
 	}
 }
 
-func TestAuthRuntimeMaintenanceHook_QuotaProbeIgnoresAuthFileProxyOverrideWhenConfigured(t *testing.T) {
+func TestAuthRuntimeMaintenanceHook_CodexQuotaProbeIgnoresAuthFileProxyURLWhenConfigured(t *testing.T) {
 	authDir := t.TempDir()
 	path := filepath.Join(authDir, "codex-auth.json")
 	data := []byte(`{"type":"codex","email":"user@example.com"}`)

@@ -73,9 +73,10 @@ func isLikelyAuthFileReference(value string) bool {
 }
 
 // NewProxyAwareHTTPClient creates an HTTP client with proper proxy configuration priority:
-// 1. Use auth.ProxyURL if configured (highest priority)
-// 2. Use cfg.ProxyURL if auth proxy is not configured
-// 3. Use RoundTripper from context if neither are configured and auth-file proxy ignore is not active
+//  1. Use auth.ProxyURL if configured (highest priority), unless ignore-auth-file-proxy-url
+//     is enabled for a file-backed auth record
+//  2. Use cfg.ProxyURL if auth proxy is not configured
+//  3. Use RoundTripper from context if neither are configured and auth-file proxy ignore is not active
 //
 // This function caches HTTP clients by proxy URL to enable TCP/TLS connection reuse.
 //
@@ -89,7 +90,7 @@ func isLikelyAuthFileReference(value string) bool {
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	proxyURL := ResolveProxyURL(cfg, auth)
-	ignoredAuthFileProxy := authFileProxyIgnored(cfg, auth)
+	ignoredAuthFileProxy := ShouldIgnoreAuthFileProxyURL(cfg, auth)
 
 	// If we have a proxy URL configured, try cache first to reuse TCP/TLS connections.
 	if proxyURL != "" {
@@ -145,6 +146,11 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	}
 
 	return httpClient
+}
+
+// ShouldIgnoreAuthFileProxyURL reports whether the auth-specific proxy_url should be ignored.
+func ShouldIgnoreAuthFileProxyURL(cfg *config.Config, auth *cliproxyauth.Auth) bool {
+	return authFileProxyIgnored(cfg, auth)
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

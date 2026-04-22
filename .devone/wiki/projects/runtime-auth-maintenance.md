@@ -17,6 +17,9 @@
 - `401` 不走立即删除，而是继续沿用 `auth-runtime` 的阈值与窗口策略，达到阈值后自动禁用 auth 文件与运行态 auth。
 - 自动检查、自动判断、后台维护队列都只允许禁用；只有远程直接调用 management delete API 时才允许删除 auth 文件。
 - watcher 会对内部写入做去抖，避免维护线程和 watcher 彼此打架。
+- `core auth auto-refresh` 在服务启动后固定以 `15m` 周期扫描 manager snapshot。
+- `Manager.shouldRefresh()` 会先跳过 `disabled` auth、`api_key` 类账号，以及 `NextRefreshAfter` 尚未到期的条目；其余条目按过期时间 / provider refresh lead / refresh_interval_seconds 决定是否刷新。
+- `codex` 当前 `RefreshLead=5d`，而 token 文件写入的是 `expired` 时间；因此项目已额外为 Codex 引入 warm/resident gate，只有“最近成功使用”或被显式常驻的 auth 才会进入后台 refresh。
 
 ## 最近新增能力
 
@@ -30,6 +33,62 @@
 - `auth-maintenance.codex-quota-check-request-interval`
   - 可按累计已完成请求次数周期性探测 Codex usage API。
   - 只有 probe 返回 `401` 时才自动禁用 auth；非 `401` 或 probe 失败都只保留账号，不触发删除。
+- disabled `codex` file auth auto-recovery
+  - 后台 `auth-maintenance` 循环现在会定期扫描带系统恢复标记的 disabled `codex` 文件账号。
+  - 若 access token 已过期或进入 refresh lead，会先复用 `CodexExecutor.Refresh` 刷新，再继续 quota probe。
+  - quota 已恢复时会自动把 auth 文件与运行态 auth 解锁；quota 未恢复时保持 disabled，并写入 `auth_maintenance_auto_recover_next_check_at`。
+  - `refresh_token_reused` 或缺少 probe 凭证会进入 terminal disable，清掉恢复标记，避免无限重试。
+  - 恢复链会把事件同时写入服务内 recent buffer 与 `auth-maintenance-recovery.jsonl`。
+
+## Codex 刷新链路补充
+
+- Codex 认证文件的过期判断依赖 metadata 中的 `expired` 字段，而不是单独解析 `access_token` JWT。
+- 服务启动后会调用 `coreManager.StartAutoRefresh(..., 15*time.Minute)`。
+- 刷新判定统一走 `Manager.shouldRefresh()`：
+  - 若 provider / auth metadata 提供 `refresh_interval_seconds`，按该固定间隔刷新；
+  - 否则按 provider 的 `RefreshLead()` 与 `ExpirationTime()` 判断；
+  - Codex 当前没有单独的 `refresh_interval_seconds` 覆盖，但会先经过 warm/resident gate。
+- Codex warm/resident gate 的当前实现：
+  - `Auth` 运行态新增 `LastUsedAt`、`WarmUntil`、`ResidentUntil`。
+  - 请求成功后，`Manager.MarkResult()` 会更新 `LastUsedAt`，并给 Codex auth 写入默认 `1h` 的 `WarmUntil`。
+  - 只有 `WarmUntil > now` 或 `ResidentUntil > now` 的 Codex auth 才允许后台 refresh。
+  - 这些热度字段当前是运行态内存字段，不写回 auth 文件 schema。
+- SimHash resident bridge（第二波补充）：
+  - `SimHashSelector` 现在通过 `BackgroundRefreshHints()` 向 manager 暴露 resident hint，而不是把 `pool.members` 直接暴露给 refresh。
+  - manager 在选路完成后的收口点持锁应用 resident hint，把当前虚拟池成员映射到 `Auth.ResidentUntil`。
+  - 当前 resident window 默认复用 Codex warm window 的 `1h`；若 auth metadata/attributes 提供以下键，则优先生效：
+    - `background_refresh_resident_window_seconds`
+    - `backgroundRefreshResidentWindowSeconds`
+    - `simhash_resident_window_seconds`
+    - `simhashResidentWindowSeconds`
+    - `resident_window_seconds`
+    - `residentWindowSeconds`
+  - 该 bridge 只对当前 provider 为 `codex` 的 auth 生效；非 Codex provider 不因本轮改造改变 refresh 语义。
+- Codex 实际 refresh 由 `internal/runtime/executor/codex_executor.go` 调 `refresh_token` 完成，成功后回写：
+  - `id_token`
+  - `access_token`
+  - `refresh_token`
+  - `account_id`
+  - `email`
+  - `expired`
+  - `last_refresh`
+- 若 refresh 返回 `refresh_token_reused`，当前实现会把 auth 直接置为 `disabled`，并写入 `refresh_disabled_reason=refresh_token_reused`，需要重新登录。
+
+## 运行态冷却与文件级禁用的区别
+
+- Codex 429 在 conductor 内首先触发运行态临时禁用：
+  - 写入 `temporary_disable_until`
+  - 冷却时长固定 `5h`
+  - 到期后通过 snapshot normalization 自动恢复
+- management runtime hook / service maintenance 还能进一步把 auth 文件写为 `disabled=true`
+  - 这是持久禁用
+  - 不会自动恢复
+  - 需走 `PATCH /v0/management/auth-files/status` 或重新登录恢复
+
+## 当前实现注意点
+
+- `auth-maintenance.enable` 明确控制 service maintenance loop；但 management runtime hook 当前代码中未见受该开关显式拦截。
+- `disable-codex-usage-limit-reached` 已在 service maintenance 使用；但 management runtime hook 当前看到的是命中 `429 + usage_limit_reached` 就直接禁用，没有读取该配置。
 
 ## 配置方法
 

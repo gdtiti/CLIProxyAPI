@@ -200,15 +200,6 @@ func ParseCodexUsage(data []byte) (usage.Detail, bool) {
 	return detail, true
 }
 
-type CodexQuotaRetryDecision struct {
-	RetryAfter *time.Duration
-	Window     string
-}
-
-func ParseCodexUsageLimitRetryAfter(body []byte, now time.Time) *time.Duration {
-	return parseCodexUsageLimitRetryAfter(body, now)
-}
-
 func parseCodexUsageLimitRetryAfter(body []byte, now time.Time) *time.Duration {
 	if len(body) == 0 || !gjson.ValidBytes(body) {
 		return nil
@@ -230,8 +221,8 @@ func parseCodexUsageLimitRetryAfter(body []byte, now time.Time) *time.Duration {
 	return nil
 }
 
-func IsCodexUsageLimitReached(body []byte) bool {
-	return isCodexUsageLimitReached(body)
+func ParseCodexUsageLimitRetryAfter(body []byte, now time.Time) *time.Duration {
+	return parseCodexUsageLimitRetryAfter(body, now)
 }
 
 func isCodexUsageLimitReached(body []byte) bool {
@@ -254,6 +245,10 @@ func isCodexUsageLimitReached(body []byte) bool {
 	return false
 }
 
+func IsCodexUsageLimitReached(body []byte) bool {
+	return isCodexUsageLimitReached(body)
+}
+
 func parseCodexQuotaRetryAfter(body []byte, now time.Time) *time.Duration {
 	decision := parseCodexQuotaRetryDecision(body, now)
 	return decision.RetryAfter
@@ -264,18 +259,12 @@ type codexQuotaRetryDecision struct {
 	Window     string
 }
 
+type CodexQuotaRetryDecision = codexQuotaRetryDecision
+
 type codexQuotaRetryCandidate struct {
 	Duration      time.Duration
 	Window        string
 	WindowSeconds int64
-}
-
-func ParseCodexQuotaRetryDecision(body []byte, now time.Time) CodexQuotaRetryDecision {
-	decision := parseCodexQuotaRetryDecision(body, now)
-	return CodexQuotaRetryDecision{
-		RetryAfter: decision.RetryAfter,
-		Window:     decision.Window,
-	}
 }
 
 func parseCodexQuotaRetryDecision(body []byte, now time.Time) codexQuotaRetryDecision {
@@ -305,6 +294,10 @@ func parseCodexQuotaRetryDecision(body []byte, now time.Time) codexQuotaRetryDec
 	}
 	retryAfter := best.Duration
 	return codexQuotaRetryDecision{RetryAfter: &retryAfter, Window: best.Window}
+}
+
+func ParseCodexQuotaRetryDecision(body []byte, now time.Time) CodexQuotaRetryDecision {
+	return parseCodexQuotaRetryDecision(body, now)
 }
 
 func collectCodexQuotaRetryCandidates(limitNode gjson.Result, now time.Time) []codexQuotaRetryCandidate {
@@ -480,6 +473,10 @@ func isUsageLimitNode(node gjson.Result) bool {
 		typeNode = strings.TrimSpace(node.Get("type").String())
 	}
 	return strings.EqualFold(typeNode, "usage_limit_reached")
+}
+
+func parseOpenAIUsage(data []byte) usage.Detail {
+	return ParseOpenAIUsage(data)
 }
 
 func ParseOpenAIUsage(data []byte) usage.Detail {

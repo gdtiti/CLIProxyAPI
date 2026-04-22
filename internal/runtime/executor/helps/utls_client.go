@@ -153,7 +153,15 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // Use this for Claude API requests to match real Claude Code's TLS behavior.
 // Falls back to standard transport for non-HTTPS requests.
 func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
-	proxyURL := ResolveProxyURL(cfg, auth)
+	var proxyURL string
+	if auth != nil {
+		if !ShouldIgnoreAuthFileProxyURL(cfg, auth) {
+			proxyURL = strings.TrimSpace(auth.ProxyURL)
+		}
+	}
+	if proxyURL == "" && cfg != nil {
+		proxyURL = strings.TrimSpace(cfg.ProxyURL)
+	}
 
 	utlsRT := newUtlsRoundTripper(proxyURL)
 

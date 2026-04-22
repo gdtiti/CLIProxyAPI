@@ -660,28 +660,6 @@ func TestManager_MarkResult_Codex429SetsWindowSpecificStatusAndReason(t *testing
 	}
 }
 
-func TestManager_MarkResult_UpdatesRoundRobinSelectorHealth(t *testing.T) {
-	selector := &RoundRobinSelector{}
-	m := NewManager(nil, selector, nil)
-
-	auth := &Auth{ID: "auth-1", Provider: "codex"}
-	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
-		t.Fatalf("register auth: %v", errRegister)
-	}
-
-	m.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "codex", Model: "gpt-5", Success: true})
-
-	selector.mu.Lock()
-	score, ok := selector.successScore["auth-1"]
-	selector.mu.Unlock()
-	if !ok {
-		t.Fatalf("expected selector success score entry for auth-1")
-	}
-	if score <= selectorSuccessScoreDefault {
-		t.Fatalf("expected score > default after success, got %v", score)
-	}
-}
-
 func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
@@ -724,9 +702,30 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride_On403(t *testing.
 	if !state.NextRetryAfter.IsZero() {
 		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
 	}
-
 	if count := reg.GetModelCount(model); count <= 0 {
 		t.Fatalf("expected model count > 0 when disable_cooling=true, got %d", count)
+	}
+}
+
+func TestManager_MarkResult_UpdatesRoundRobinSelectorHealth(t *testing.T) {
+	selector := &RoundRobinSelector{}
+	m := NewManager(nil, selector, nil)
+
+	auth := &Auth{ID: "auth-1", Provider: "codex"}
+	if _, errRegister := m.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	m.MarkResult(context.Background(), Result{AuthID: "auth-1", Provider: "codex", Model: "gpt-5", Success: true})
+
+	selector.mu.Lock()
+	score, ok := selector.successScore["auth-1"]
+	selector.mu.Unlock()
+	if !ok {
+		t.Fatalf("expected selector success score entry for auth-1")
+	}
+	if score <= selectorSuccessScoreDefault {
+		t.Fatalf("expected score > default after success, got %v", score)
 	}
 }
 

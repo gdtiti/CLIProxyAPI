@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/codexquota"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 )
 
 type codexPayloadConfigResponse struct {
@@ -114,7 +115,7 @@ func (h *Handler) GetCodexAuthQuota(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex quota service unavailable"})
 		return
 	}
-	items := service.ListSnapshots()
+	items := h.filterCurrentCodexSnapshotViews(service.ListSnapshots())
 	filtered, err := filterCodexSnapshotViews(c, items)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -165,14 +166,22 @@ func (h *Handler) GetCodexAuthQuotaByIndex(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing auth_index"})
 		return
 	}
+	if !h.currentCodexAuthExists("", authIndex) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found"})
+		return
+	}
 	snapshot, ok := service.GetSnapshot(authIndex)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found"})
 		return
 	}
+	if !h.currentCodexAuthExists(snapshot.AuthID, snapshot.AuthIndex) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "codex auth not found"})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"snapshot": snapshot,
-		"events":   service.ListEvents(authIndex, 50),
+		"events":   h.filterCurrentCodexEvents(service.ListEvents(authIndex, 50)),
 	})
 }
 
@@ -192,7 +201,7 @@ func (h *Handler) GetCodexAuthEvents(c *gin.Context) {
 		limit = value
 	}
 	authIndex := strings.TrimSpace(c.Query("auth_index"))
-	items := service.ListEvents(authIndex, 0)
+	items := h.filterCurrentCodexEvents(service.ListEvents(authIndex, 0))
 	filtered, err := filterCodexEvents(c, items)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -242,7 +251,7 @@ func (h *Handler) GetCodexAuthUsage(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "codex quota service unavailable"})
 		return
 	}
-	items := service.ListRollups()
+	items := h.filterCurrentCodexUsageRollups(service.ListRollups())
 	filtered, err := filterCodexUsageRollups(c, items)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -671,6 +680,124 @@ func (h *Handler) PutCodexAuthConfig(c *gin.Context) {
 	h.mu.Unlock()
 
 	h.persist(c)
+}
+
+type codexAuthIdentitySet struct {
+	authIDs     map[string]struct{}
+	authIndexes map[string]struct{}
+}
+
+func (h *Handler) currentCodexAuthSet() *codexAuthIdentitySet {
+	if h == nil || h.authManager == nil {
+		return nil
+	}
+	auths := h.authManager.List()
+	if len(auths) == 0 {
+		return &codexAuthIdentitySet{
+			authIDs:     map[string]struct{}{},
+			authIndexes: map[string]struct{}{},
+		}
+	}
+	ids := make(map[string]struct{}, len(auths))
+	indexes := make(map[string]struct{}, len(auths))
+	for _, auth := range auths {
+		if !isCodexManagementAuth(auth) {
+			continue
+		}
+		if authID := strings.TrimSpace(auth.ID); authID != "" {
+			ids[authID] = struct{}{}
+		}
+		if authIndex := strings.TrimSpace(auth.EnsureIndex()); authIndex != "" {
+			indexes[authIndex] = struct{}{}
+		}
+	}
+	return &codexAuthIdentitySet{
+		authIDs:     ids,
+		authIndexes: indexes,
+	}
+}
+
+func (h *Handler) currentCodexAuthExists(authID, authIndex string) bool {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return true
+	}
+	authID = strings.TrimSpace(authID)
+	authIndex = strings.TrimSpace(authIndex)
+	if authID != "" {
+		_, ok := authSet.authIDs[authID]
+		return ok
+	}
+	if authIndex != "" {
+		_, ok := authSet.authIndexes[authIndex]
+		return ok
+	}
+	return false
+}
+
+func (h *Handler) filterCurrentCodexSnapshotViews(items []codexquota.SnapshotView) []codexquota.SnapshotView {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return items
+	}
+	filtered := make([]codexquota.SnapshotView, 0, len(items))
+	for _, item := range items {
+		if currentCodexAuthMatches(authSet, item.AuthID, item.AuthIndex) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) filterCurrentCodexUsageRollups(items []codexquota.UsageRollup) []codexquota.UsageRollup {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return items
+	}
+	filtered := make([]codexquota.UsageRollup, 0, len(items))
+	for _, item := range items {
+		if currentCodexAuthMatches(authSet, item.AuthID, item.AuthIndex) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (h *Handler) filterCurrentCodexEvents(items []codexquota.Event) []codexquota.Event {
+	authSet := h.currentCodexAuthSet()
+	if authSet == nil {
+		return items
+	}
+	filtered := make([]codexquota.Event, 0, len(items))
+	for _, item := range items {
+		if currentCodexAuthMatches(authSet, item.AuthID, item.AuthIndex) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func currentCodexAuthMatches(authSet *codexAuthIdentitySet, authID, authIndex string) bool {
+	if authSet == nil {
+		return true
+	}
+	authID = strings.TrimSpace(authID)
+	authIndex = strings.TrimSpace(authIndex)
+	if authID != "" {
+		if _, ok := authSet.authIDs[authID]; ok {
+			return true
+		}
+	}
+	if authIndex != "" {
+		if _, ok := authSet.authIndexes[authIndex]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isCodexManagementAuth(auth *coreauth.Auth) bool {
+	return auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex")
 }
 
 var allowedCodexQuotaSortFields = map[string]struct{}{
