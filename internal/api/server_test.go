@@ -19,6 +19,10 @@ import (
 )
 
 func newTestServer(t *testing.T) *Server {
+	return newTestServerWithConfig(t, nil)
+}
+
+func newTestServerWithConfig(t *testing.T, configure func(*proxyconfig.Config)) *Server {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -39,12 +43,44 @@ func newTestServer(t *testing.T) *Server {
 		LoggingToFile:          false,
 		UsageStatisticsEnabled: false,
 	}
+	if configure != nil {
+		configure(cfg)
+	}
 
 	authManager := auth.NewManager(nil, nil, nil)
 	accessManager := sdkaccess.NewManager()
 
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	return NewServer(cfg, authManager, accessManager, configPath)
+}
+
+func TestNewServerRegistersCodexManagementRoutesOnce(t *testing.T) {
+	server := newTestServerWithConfig(t, func(cfg *proxyconfig.Config) {
+		cfg.RemoteManagement.SecretKey = "test-management-secret"
+	})
+
+	expectedRoutes := map[string]int{
+		"GET /v0/management/codex-auth-quota":             0,
+		"GET /v0/management/codex-auth-quota/:auth_index": 0,
+		"GET /v0/management/codex-auth-events":            0,
+		"GET /v0/management/codex-auth-usage":             0,
+		"GET /v0/management/codex-auth-config":            0,
+		"PUT /v0/management/codex-auth-config":            0,
+		"GET /v0/management/codex-auth-refresh-history":   0,
+	}
+
+	for _, route := range server.engine.Routes() {
+		key := route.Method + " " + route.Path
+		if _, ok := expectedRoutes[key]; ok {
+			expectedRoutes[key]++
+		}
+	}
+
+	for route, count := range expectedRoutes {
+		if count != 1 {
+			t.Fatalf("expected route %s to be registered once, got %d", route, count)
+		}
+	}
 }
 
 func TestHealthz(t *testing.T) {
