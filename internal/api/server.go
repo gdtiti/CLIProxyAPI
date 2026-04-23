@@ -699,12 +699,6 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/codex-auth-refresh-history", s.mgmt.ListCodexAuthRefreshHistory)
-		mgmt.GET("/codex-auth-quota", s.mgmt.GetCodexAuthQuota)
-		mgmt.GET("/codex-auth-quota/:auth_index", s.mgmt.GetCodexAuthQuotaByIndex)
-		mgmt.GET("/codex-auth-events", s.mgmt.GetCodexAuthEvents)
-		mgmt.GET("/codex-auth-usage", s.mgmt.GetCodexAuthUsage)
-		mgmt.GET("/codex-auth-config", s.mgmt.GetCodexAuthConfig)
-		mgmt.PUT("/codex-auth-config", s.mgmt.PutCodexAuthConfig)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
