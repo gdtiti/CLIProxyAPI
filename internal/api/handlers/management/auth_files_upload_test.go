@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"mime/multipart"
@@ -144,6 +145,78 @@ func TestUploadAuthFileMultipart_PersistsStoreAndReloadsManager(t *testing.T) {
 	}
 }
 
+func TestUploadAuthFileMultipart_EnrichesCodexAccountIDFromIDToken(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	store := &uploadPersistStore{}
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = store
+
+	idToken := buildCodexUploadTestIDToken(t, "acc-upload")
+	payload := `{"type":"codex","email":"upload@example.com","id_token":"` + idToken + `","access_token":"tok-upload"}`
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "codex-upload-account.json")
+	if err != nil {
+		t.Fatalf("create form file: %v", err)
+	}
+	if _, err = part.Write([]byte(payload)); err != nil {
+		t.Fatalf("write multipart payload: %v", err)
+	}
+	if err = writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("UploadAuthFile status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	authID := h.authIDForPath(filepath.Join(authDir, "codex-upload-account.json"))
+	uploaded, ok := manager.GetByID(authID)
+	if !ok || uploaded == nil {
+		t.Fatalf("expected uploaded auth %q in manager", authID)
+	}
+	if got := uploaded.Metadata["account_id"]; got != "acc-upload" {
+		t.Fatalf("manager account_id = %v, want %q", got, "acc-upload")
+	}
+
+	listRec := httptest.NewRecorder()
+	listCtx, _ := gin.CreateTestContext(listRec)
+	listCtx.Request = httptest.NewRequest(http.MethodGet, "/v0/management/auth-files", nil)
+	h.ListAuthFiles(listCtx)
+
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("ListAuthFiles status = %d, want %d, body=%s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var listPayload struct {
+		Files []map[string]any `json:"files"`
+	}
+	if err = json.Unmarshal(listRec.Body.Bytes(), &listPayload); err != nil {
+		t.Fatalf("unmarshal list payload: %v", err)
+	}
+	if len(listPayload.Files) != 1 {
+		t.Fatalf("files len = %d, want 1", len(listPayload.Files))
+	}
+	entry := listPayload.Files[0]
+	if got := entry["account_id"]; got != "acc-upload" {
+		t.Fatalf("list account_id = %v, want %q", got, "acc-upload")
+	}
+	if got := entry["chatgpt_account_id"]; got != "acc-upload" {
+		t.Fatalf("list chatgpt_account_id = %v, want %q", got, "acc-upload")
+	}
+}
+
 func TestUploadAuthFileRaw_PersistFailureReturnsErrorAndRestoresFile(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "")
 	gin.SetMode(gin.TestMode)
@@ -192,6 +265,23 @@ func TestUploadAuthFileRaw_PersistFailureReturnsErrorAndRestoresFile(t *testing.
 	if string(raw) != `{"type":"codex","email":"old@example.com"}` {
 		t.Fatalf("restored auth file = %s, want original content", string(raw))
 	}
+}
+
+func buildCodexUploadTestIDToken(t *testing.T, accountID string) string {
+	t.Helper()
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := map[string]any{
+		"email": "user@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": accountID,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(body) + "."
 }
 
 func TestUploadAuthFilesBatchMultipart_PersistsAllFiles(t *testing.T) {

@@ -21,6 +21,32 @@ func TestAccountIDFromIDToken(t *testing.T) {
 	})
 }
 
+func TestAccountIDFromMetadata(t *testing.T) {
+	t.Run("prefers direct account_id", func(t *testing.T) {
+		metadata := map[string]any{
+			"account_id": " acc-direct ",
+			"id_token":   buildTestIDToken(t, "acc-token"),
+		}
+		if got := AccountIDFromMetadata(metadata); got != "acc-direct" {
+			t.Fatalf("AccountIDFromMetadata() = %q, want %q", got, "acc-direct")
+		}
+	})
+
+	t.Run("supports chatgpt_account_id", func(t *testing.T) {
+		metadata := map[string]any{"chatgpt_account_id": "acc-chatgpt"}
+		if got := AccountIDFromMetadata(metadata); got != "acc-chatgpt" {
+			t.Fatalf("AccountIDFromMetadata() = %q, want %q", got, "acc-chatgpt")
+		}
+	})
+
+	t.Run("falls back to id_token", func(t *testing.T) {
+		metadata := map[string]any{"id_token": buildTestIDToken(t, "acc-token")}
+		if got := AccountIDFromMetadata(metadata); got != "acc-token" {
+			t.Fatalf("AccountIDFromMetadata() = %q, want %q", got, "acc-token")
+		}
+	})
+}
+
 func buildTestIDToken(t *testing.T, accountID string) string {
 	t.Helper()
 

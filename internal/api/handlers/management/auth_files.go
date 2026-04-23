@@ -964,6 +964,10 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if email := authEmail(auth); email != "" {
 		entry["email"] = email
 	}
+	if accountID := codex.AccountIDFromMetadata(auth.Metadata); accountID != "" {
+		entry["account_id"] = accountID
+		entry["chatgpt_account_id"] = accountID
+	}
 	if accountType, account := auth.AccountInfo(); accountType != "" || account != "" {
 		if accountType != "" {
 			entry["account_type"] = accountType
@@ -1322,6 +1326,28 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 		return ""
 	}
 	return auth.Attributes[key]
+}
+
+func isCodexMetadata(auth *coreauth.Auth, metadata map[string]any) bool {
+	if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+		return true
+	}
+	if len(metadata) == 0 {
+		return false
+	}
+	provider, _ := metadata["type"].(string)
+	return strings.EqualFold(strings.TrimSpace(provider), "codex")
+}
+
+func normalizeCodexMetadataAccountID(metadata map[string]any) {
+	if len(metadata) == 0 {
+		return
+	}
+	accountID := codex.AccountIDFromMetadata(metadata)
+	if accountID == "" {
+		return
+	}
+	metadata["account_id"] = accountID
 }
 
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
@@ -2096,6 +2122,9 @@ func (h *Handler) loadAuthFileMetadata(auth *coreauth.Auth) (string, map[string]
 			if err := json.Unmarshal(data, &metadata); err != nil {
 				return "", nil, fmt.Errorf("invalid auth file: %w", err)
 			}
+			if isCodexMetadata(auth, metadata) {
+				normalizeCodexMetadataAccountID(metadata)
+			}
 			return path, metadata, nil
 		} else if !os.IsNotExist(errRead) {
 			return "", nil, fmt.Errorf("failed to read auth file: %w", errRead)
@@ -2109,6 +2138,9 @@ func (h *Handler) loadAuthFileMetadata(auth *coreauth.Auth) (string, map[string]
 		if email := authEmail(auth); email != "" {
 			metadata["email"] = email
 		}
+	}
+	if isCodexMetadata(auth, metadata) {
+		normalizeCodexMetadataAccountID(metadata)
 	}
 	return path, metadata, nil
 }

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/authfs"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -285,8 +286,7 @@ func (h *Handler) probeManagedCodexUsageStatus(ctx context.Context, auth *coreau
 	if apiKey == "" {
 		apiKey = tokenValueFromMetadata(auth.Metadata)
 	}
-	accountID, _ := auth.Metadata["account_id"].(string)
-	accountID = strings.TrimSpace(accountID)
+	accountID := codex.AccountIDFromMetadata(auth.Metadata)
 	if apiKey == "" || accountID == "" {
 		return 0, nil
 	}

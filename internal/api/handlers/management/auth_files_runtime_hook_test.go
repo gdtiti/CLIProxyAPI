@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -246,6 +247,84 @@ func TestAuthRuntimeMaintenanceHook_DisablesCodexAuthFileAfterQuotaProbeUnauthor
 	if !coreauth.IsAuthMaintenanceAutoRecoverable(updated) {
 		t.Fatalf("expected runtime auth to carry auto-recovery marker")
 	}
+}
+
+func TestAuthRuntimeMaintenanceHook_UsesIDTokenWhenAccountIDMissing(t *testing.T) {
+	authDir := t.TempDir()
+	path := filepath.Join(authDir, "codex-auth.json")
+	idToken := buildCodexRuntimeHookTestIDToken(t, "acct-from-id-token")
+	data := []byte(`{"type":"codex","email":"user@example.com","id_token":"` + idToken + `"}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	var probeCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probeCalls.Add(1)
+		if got := r.Header.Get("Chatgpt-Account-Id"); got != "acct-from-id-token" {
+			t.Fatalf("Chatgpt-Account-Id = %q, want %q", got, "acct-from-id-token")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	handler := NewHandlerWithoutConfigFilePath(&config.Config{
+		AuthDir: authDir,
+		AuthMaintenance: config.AuthMaintenanceConfig{
+			Enable:                         true,
+			CodexQuotaCheckRequestInterval: 1,
+		},
+	}, manager)
+	handler.tokenStore = &memoryAuthStore{}
+
+	if err := handler.reloadAuthFile(context.Background(), path, data); err != nil {
+		t.Fatalf("reloadAuthFile() error = %v", err)
+	}
+
+	auth, ok := manager.GetByID("codex-auth.json")
+	if !ok || auth == nil {
+		t.Fatalf("expected auth to exist after reload")
+	}
+	if auth.Metadata == nil {
+		t.Fatalf("expected auth metadata after reload")
+	}
+	delete(auth.Metadata, "account_id")
+	auth.Metadata["access_token"] = "test-token"
+	if auth.Attributes == nil {
+		auth.Attributes = make(map[string]string)
+	}
+	auth.Attributes["base_url"] = server.URL
+	if _, err := manager.Update(context.Background(), auth); err != nil {
+		t.Fatalf("manager.Update() error = %v", err)
+	}
+
+	manager.MarkResult(context.Background(), coreauth.Result{
+		AuthID:   "codex-auth.json",
+		Provider: "codex",
+		Success:  true,
+	})
+
+	if got := probeCalls.Load(); got != 1 {
+		t.Fatalf("probeCalls = %d, want 1", got)
+	}
+}
+
+func buildCodexRuntimeHookTestIDToken(t *testing.T, accountID string) string {
+	t.Helper()
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := map[string]any{
+		"email": "user@example.com",
+		"https://api.openai.com/auth": map[string]any{
+			"chatgpt_account_id": accountID,
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	return header + "." + base64.RawURLEncoding.EncodeToString(body) + "."
 }
 
 func TestAuthRuntimeMaintenanceHook_CodexQuotaProbeIgnoresAuthFileProxyURLWhenConfigured(t *testing.T) {

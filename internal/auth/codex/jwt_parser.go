@@ -114,3 +114,20 @@ func AccountIDFromIDToken(token string) string {
 	}
 	return strings.TrimSpace(claims.GetAccountID())
 }
+
+// AccountIDFromMetadata extracts the ChatGPT account ID from codex auth metadata.
+// It supports direct account_id/chatgpt_account_id fields and falls back to parsing id_token.
+func AccountIDFromMetadata(metadata map[string]any) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+	for _, key := range []string{"account_id", "chatgpt_account_id"} {
+		if value, ok := metadata[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	idToken, _ := metadata["id_token"].(string)
+	return AccountIDFromIDToken(idToken)
+}
